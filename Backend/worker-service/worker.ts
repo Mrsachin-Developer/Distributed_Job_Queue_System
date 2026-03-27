@@ -28,11 +28,11 @@ async function startWorker() {
 
         console.log(`📥 Job received: ${job.id}`);
 
-        // 🔄 get existing state
+        // get existing state
         const jobStateRaw = await redisClient.get(`job:${job.id}`);
         const jobState = jobStateRaw ? JSON.parse(jobStateRaw) : {};
 
-        // 🔵 processing
+        // processing
         await redisClient.set(
           `job:${job.id}`,
           JSON.stringify({
@@ -40,13 +40,13 @@ async function startWorker() {
             status: "processing",
             error: null,
           }),
-          { EX: 3600 }
+          { EX: 3600 },
         );
 
-        // ⚙️ process job
+        // process job
         await processJob(job);
 
-        // 🟢 completed
+ 
         await redisClient.set(
           `job:${job.id}`,
           JSON.stringify({
@@ -54,8 +54,9 @@ async function startWorker() {
             status: "completed",
             result: "Job completed successfully",
             error: null,
+            startedAt:new Date().toISOString(),
           }),
-          { EX: 3600 }
+          { EX: 3600 },
         );
 
         console.log(`✅ Job completed: ${job.id}`);
@@ -74,7 +75,7 @@ async function startWorker() {
 
           console.log(`🔁 Retrying job ${job.id}, attempt ${newRetryCount}`);
 
-          // delay
+          // delay other wise it hit too fast which may cause to retry storm lead to crash
           await sleep(2000);
 
           // update state
@@ -86,7 +87,7 @@ async function startWorker() {
               retryCount: newRetryCount,
               error: error.message,
             }),
-            { EX: 3600 }
+            { EX: 3600 },
           );
 
           //retry job
@@ -101,7 +102,7 @@ async function startWorker() {
               status: "failed",
               error: error.message,
             }),
-            { EX: 3600 }
+            { EX: 3600 },
           );
         }
       }

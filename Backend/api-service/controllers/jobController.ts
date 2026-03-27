@@ -8,8 +8,8 @@ export async function createJob(req: Request, res: Response) {
     const jobId = uuidv4();
 
     if (!req.body.type) {
-  return res.status(400).json({ message: "Job type is required" });
-}
+      return res.status(400).json({ message: "Job type is required" });
+    }
     const job = {
       id: jobId,
       type: req.body.type,
@@ -23,9 +23,9 @@ export async function createJob(req: Request, res: Response) {
         status: "queued",
         result: null,
         error: null,
-        retryCount:0,
-        createdAt:new Date().toISOString(),
-      
+        retryCount: 0,
+        createdAt: new Date().toISOString(),
+        jobData: job,
       }),
       {
         EX: 3600, // expire in 1 hour
@@ -38,7 +38,7 @@ export async function createJob(req: Request, res: Response) {
       status: "queued",
     });
   } catch (error) {
-console.error("CreateJob Error:", error);
+    console.error("CreateJob Error:", error);
 
     res.status(500).json({
       message: "Internal server error",
