@@ -1,32 +1,110 @@
 import { connectRedis, redisClient } from "../shared/redis/redisClient";
 import { processJob } from "./processors/jobProcessor";
 
-console.log("WORKER FILE STARTED");
+console.log("🚀 WORKER FILE STARTED");
+
+const MAX_RETRIES = 3;
+
+async function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function startWorker() {
   console.log("Starting worker...");
-  //Connect Redis
+
   await connectRedis();
   console.log("Worker connected to Redis");
 
   while (true) {
+    let job: any = null;
+
     try {
-      console.log("Waiting for job...");
+      console.log("⏳ Waiting for job...");
 
       const result = await redisClient.blPop("job_queue", 0);
 
       if (result) {
-        const jobData = result.element; // Redis returns { key, element }
+        job = JSON.parse(result.element);
 
-        // Parse job
-        const job = JSON.parse(jobData);
+        console.log(`📥 Job received: ${job.id}`);
 
-        console.log("Job received:", job.id);
+        // 🔄 get existing state
+        const jobStateRaw = await redisClient.get(`job:${job.id}`);
+        const jobState = jobStateRaw ? JSON.parse(jobStateRaw) : {};
 
+        // 🔵 processing
+        await redisClient.set(
+          `job:${job.id}`,
+          JSON.stringify({
+            ...jobState,
+            status: "processing",
+            error: null,
+          }),
+          { EX: 3600 }
+        );
+
+        // ⚙️ process job
         await processJob(job);
+
+        // 🟢 completed
+        await redisClient.set(
+          `job:${job.id}`,
+          JSON.stringify({
+            ...jobState,
+            status: "completed",
+            result: "Job completed successfully",
+            error: null,
+          }),
+          { EX: 3600 }
+        );
+
+        console.log(`✅ Job completed: ${job.id}`);
       }
-    } catch (error) {
-      console.error("Worker error:", error);
+    } catch (error: any) {
+      console.error("❌ Worker error:", error);
+
+      if (job?.id) {
+        const jobStateRaw = await redisClient.get(`job:${job.id}`);
+        const jobState = jobStateRaw ? JSON.parse(jobStateRaw) : {};
+
+        const retryCount = jobState.retryCount || 0;
+
+        if (retryCount < MAX_RETRIES) {
+          const newRetryCount = retryCount + 1;
+
+          console.log(`🔁 Retrying job ${job.id}, attempt ${newRetryCount}`);
+
+          // delay
+          await sleep(2000);
+
+          // update state
+          await redisClient.set(
+            `job:${job.id}`,
+            JSON.stringify({
+              ...jobState,
+              status: "queued",
+              retryCount: newRetryCount,
+              error: error.message,
+            }),
+            { EX: 3600 }
+          );
+
+          //retry job
+          await redisClient.rPush("job_queue", JSON.stringify(job));
+        } else {
+          console.log(`💀 Job permanently failed: ${job.id}`);
+
+          await redisClient.set(
+            `job:${job.id}`,
+            JSON.stringify({
+              ...jobState,
+              status: "failed",
+              error: error.message,
+            }),
+            { EX: 3600 }
+          );
+        }
+      }
     }
   }
 }
