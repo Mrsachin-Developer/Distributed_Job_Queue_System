@@ -28,6 +28,21 @@ async function startScanner() {
           if (now - startedAt > STUCK_THRESHOLD) {
             console.log(`⚠️ Stuck job detected: ${jobKey}`);
 
+            const jobId = jobState.jobData?.id;
+            if (!jobId) {
+              console.error(`❌ Missing job id for ${jobKey}`);
+              continue;
+            }
+            const lockKey = `lock:${jobId}`;
+            const activeLock = await redisClient.get(lockKey);
+
+            if (activeLock) {
+              console.log(
+                `🔒 Job ${jobId} is still actively processing. Skipping recovery.`,
+              );
+              continue;
+            }
+
             // Update state
             await redisClient.set(
               jobKey,
