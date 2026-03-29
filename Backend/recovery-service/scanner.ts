@@ -12,79 +12,111 @@ async function startScanner() {
 
   while (true) {
     try {
-      const jobKeys = await redisClient.keys("job:*");
+      let cursor = "0";
 
-      for (const jobKey of jobKeys) {
-        const jobStateRaw = await redisClient.get(jobKey);
+      do {
+        const jobKeys = await redisClient.scan(cursor, {
+          MATCH: "job:*",
+          COUNT: 100,
+        });
 
-        const jobState = jobStateRaw ? JSON.parse(jobStateRaw) : {};
+        cursor = jobKeys.cursor;
+        const Keys = jobKeys.keys;
 
-        // Only check processing jobs
-        if (jobState.status === "processing" && jobState.startedAt) {
-          const now = Date.now();
-          const startedAt = new Date(jobState.startedAt).getTime();
+        for (const jobKey of Keys) {
+          const jobStateRaw = await redisClient.get(jobKey);
 
-          // Check if job is stuck
-          if (now - startedAt > STUCK_THRESHOLD) {
-            console.log(`⚠️ Stuck job detected: ${jobKey}`);
+          const jobState = jobStateRaw ? JSON.parse(jobStateRaw) : {};
 
-            const jobId = jobState.jobData?.id;
-            if (!jobId) {
-              console.error(`❌ Missing job id for ${jobKey}`);
-              continue;
-            }
-            const lockKey = `lock:${jobId}`;
-            const activeLock = await redisClient.get(lockKey);
+          // Only check processing jobs
+          if (jobState.status === "processing" && jobState.startedAt) {
+            const now = Date.now();
+            const startedAt = new Date(jobState.startedAt).getTime();
 
-            if (activeLock) {
-              console.log(
-                `🔒 Job ${jobId} is still actively processing. Skipping recovery.`,
+            // Check if job is stuck
+            if (now - startedAt > STUCK_THRESHOLD) {
+              console.log(`⚠️ Stuck job detected: ${jobKey}`);
+
+              const jobId = jobState.jobData?.id;
+              if (!jobId) {
+                console.error(`❌ Missing job id for ${jobKey}`);
+                continue;
+              }
+              const lockKey = `lock:${jobId}`;
+              const activeLock = await redisClient.get(lockKey);
+
+              if (activeLock) {
+                console.log(
+                  `🔒 Job ${jobId} is still actively processing. Skipping recovery.`,
+                );
+                continue;
+              }
+
+              const isProcessed = await redisClient.exists(
+                `processed:${jobId}`,
               );
-              continue;
-            }
+              // If job is already processed, just update state to completed and skip recovery
+              if (isProcessed) {
+                console.log(`✅ Job already processed: ${jobId}`);
+                await redisClient.set(
+                  `job:${jobId}`,
+                  JSON.stringify({
+                    status: "completed",
+                    result: "Job completed successfully",
+                    error: null,
+                    completedAt: new Date().toISOString(),
+                  }),
+                  { EX: 3600 },
+                );
+                continue;
+              }
 
-            // Update state
-            await redisClient.set(
-              jobKey,
-              JSON.stringify({
-                ...jobState,
-                status: "queued",
-                error: "Recovered from stuck state",
-              }),
-              { EX: 3600 },
-            );
+              // Update state
+              await redisClient.set(
+                jobKey,
+                JSON.stringify({
+                  ...jobState,
+                  status: "queued",
+                  error: "Recovered from stuck state",
+                }),
+                { EX: 3600 },
+              );
 
-            // Requeue job
-            const originalJob = jobState.jobData;
+              // Requeue job
+              const originalJob = jobState.jobData;
 
-            //“Why check if (originalJob)?”
+              //“Why check if (originalJob)?”
 
-            // You say:
-            // “To ensure we only requeue valid job data. Without this check, undefined or malformed jobs could be pushed into the queue, causing worker crashes and system instability.”
+              // You say:
+              // “To ensure we only requeue valid job data. Without this check, undefined or malformed jobs could be pushed into the queue, causing worker crashes and system instability.”
 
-            //Even worse case:
-            //JSON.stringify(null) → "null"
+              //Even worse case:
+              //JSON.stringify(null) → "null"
 
-            //Worker:
-            // const job = JSON.parse("null"); // job = null
+              //Worker:
+              // const job = JSON.parse("null"); // job = null
 
-            // Then:
-            // job.id ❌ → crash
-            // job.payload ❌ → crash
-            // 🧠 So That Check Prevents:
-            // Invalid job pushed to queue ❌
-            // Worker crashes ❌
-            // System instability ❌
-            if (originalJob) {
-              await redisClient.rPush("job_queue", JSON.stringify(originalJob));
+              // Then:
+              // job.id ❌ → crash
+              // job.payload ❌ → crash
+              // 🧠 So That Check Prevents:
+              // Invalid job pushed to queue ❌
+              // Worker crashes ❌
+              // System instability ❌
+              if (originalJob) {
+                await redisClient.rPush(
+                  "job_queue",
+                  JSON.stringify(originalJob),
+                );
 
-              console.log(`♻️ Re-queued job: ${originalJob.id}`);
-            } else {
-              console.error(`❌ Missing jobData for ${jobKey}`);
+                console.log(`♻️ Re-queued job: ${originalJob.id}`);
+              } else {
+                console.error(`❌ Missing jobData for ${jobKey}`);
+              }
             }
           }
         }
-      }
+      } while (cursor !== "0");
     } catch (err) {
       console.error("❌ Scanner error:", err);
     }

@@ -32,7 +32,6 @@ async function startWorker() {
           EX: 30, // auto expire after 30 sec to prevent deadlocks
         });
 
-
         // !lockAcquired
         // This means: this worker could NOT get the lock
         // Which means: another worker already has it
@@ -40,8 +39,24 @@ async function startWorker() {
           console.log(`🔒 Job already locked: ${job.id}`);
           continue;
         }
+
+        const isProcessed = await redisClient.exists(`processed:${job.id}`);
         console.log(`📥 Job received: ${job.id}`);
 
+        if (isProcessed) {
+          console.log(`✅ Job already processed: ${job.id}`);
+          // add a record to indicate this job is processed to prevent other worker process it again
+          await redisClient.set(
+            `job:${job.id}`,
+            JSON.stringify({
+              status: "completed",
+              result: "Job completed successfully",
+              error: null,
+            }),
+            { EX: 3600 },
+          );
+          continue;
+        }
         // get existing state
         const jobStateRaw = await redisClient.get(`job:${job.id}`);
         const jobState = jobStateRaw ? JSON.parse(jobStateRaw) : {};
@@ -60,14 +75,14 @@ async function startWorker() {
         // process job
         await processJob(job);
 
+        // mark as processed
+        await redisClient.set(`processed:${job.id}`, "true", { EX: 3600 });
         await redisClient.set(
           `job:${job.id}`,
           JSON.stringify({
-            ...jobState,
             status: "completed",
             result: "Job completed successfully",
             error: null,
-            startedAt: new Date().toISOString(),
           }),
           { EX: 3600 },
         );
