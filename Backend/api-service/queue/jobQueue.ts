@@ -1,7 +1,5 @@
 import { redisClient } from "../../shared/redis/redisClient";
 
-const QUEUE_NAME = "job_queue";
-
-export async function addJobToQueue(job: any) {
-  await redisClient.rPush(QUEUE_NAME, JSON.stringify(job));
+export async function addJobToQueue(queueName: string, job: any) {
+  await redisClient.rPush(queueName, JSON.stringify(job));
 }

@@ -61,6 +61,7 @@ async function startScanner() {
                 await redisClient.set(
                   `job:${jobId}`,
                   JSON.stringify({
+                    ...jobState,
                     status: "completed",
                     result: "Job completed successfully",
                     error: null,
@@ -105,10 +106,9 @@ async function startScanner() {
               // System instability ❌
               if (originalJob) {
                 await redisClient.rPush(
-                  "job_queue",
+                  `${originalJob.priority}_priority_queue`,
                   JSON.stringify(originalJob),
                 );
-
                 console.log(`♻️ Re-queued job: ${originalJob.id}`);
               } else {
                 console.error(`❌ Missing jobData for ${jobKey}`);

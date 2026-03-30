@@ -21,8 +21,10 @@ async function startWorker() {
     try {
       console.log("⏳ Waiting for job...");
 
-      const result = await redisClient.blPop("job_queue", 0);
-
+      const result = await redisClient.blPop(
+        ["high_priority_queue", "medium_priority_queue", "low_priority_queue"],
+        0,
+      );
       if (result) {
         job = JSON.parse(result.element);
         const lockKey = `lock:${job.id}`;
@@ -67,6 +69,7 @@ async function startWorker() {
           JSON.stringify({
             ...jobState,
             status: "processing",
+            startedAt: new Date().toISOString(),
             error: null,
           }),
           { EX: 3600 },
@@ -75,14 +78,20 @@ async function startWorker() {
         // process job
         await processJob(job);
 
+        // get latest state after processing, in case there is update during processing (like retry from other worker)
+        const latestStateRaw = await redisClient.get(`job:${job.id}`);
+        const latestState = latestStateRaw ? JSON.parse(latestStateRaw) : {};
+
         // mark as processed
         await redisClient.set(`processed:${job.id}`, "true", { EX: 3600 });
         await redisClient.set(
           `job:${job.id}`,
           JSON.stringify({
+            ...latestState,
             status: "completed",
             result: "Job completed successfully",
             error: null,
+            completedAt: new Date().toISOString(),
           }),
           { EX: 3600 },
         );
@@ -119,7 +128,10 @@ async function startWorker() {
           );
 
           //retry job
-          await redisClient.rPush("job_queue", JSON.stringify(job));
+          await redisClient.rPush(
+            `${job.priority}_priority_queue`,
+            JSON.stringify(job),
+          );
         } else {
           console.log(`💀 Job permanently failed: ${job.id}`);
 
