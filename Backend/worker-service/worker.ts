@@ -15,16 +15,33 @@ async function startWorker() {
   await connectRedis();
   console.log("Worker connected to Redis");
 
+  const SCHEDULE = [
+    "high_priority_queue",
+    "high_priority_queue",
+    "high_priority_queue",
+    "high_priority_queue",
+    "high_priority_queue",
+    "medium_priority_queue",
+    "medium_priority_queue",
+    "low_priority_queue",
+  ];
+  let index = 0;
   while (true) {
     let job: any = null;
 
     try {
-      console.log("⏳ Waiting for job...");
+ 
 
-      const result = await redisClient.blPop(
-        ["high_priority_queue", "medium_priority_queue", "low_priority_queue"],
-        0,
-      );
+      const queue = SCHEDULE[index];
+
+      // If:
+      // index = 7 (last position)
+      // Then:
+      // (7 + 1) % 8 = 0
+      // 👉 back to start
+      index = (index + 1) % SCHEDULE.length;
+
+      const result = await redisClient.blPop(queue, 1);
       if (result) {
         job = JSON.parse(result.element);
         const lockKey = `lock:${job.id}`;
@@ -47,16 +64,22 @@ async function startWorker() {
 
         if (isProcessed) {
           console.log(`✅ Job already processed: ${job.id}`);
-          // add a record to indicate this job is processed to prevent other worker process it again
+
+          const jobStateRaw = await redisClient.get(`job:${job.id}`);
+          const jobState = jobStateRaw ? JSON.parse(jobStateRaw) : {};
+
           await redisClient.set(
             `job:${job.id}`,
             JSON.stringify({
+              ...jobState,
               status: "completed",
               result: "Job completed successfully",
               error: null,
+              completedAt: new Date().toISOString(),
             }),
             { EX: 3600 },
           );
+
           continue;
         }
         // get existing state
