@@ -11,3 +11,46 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+enum JobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum JobPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Job {
+  id String @id @default(uuid())
+
+  // input
+  payload  Json
+  priority JobPriority @default(MEDIUM)
+
+  // State
+  status JobStatus @default(QUEUED)
+
+  // Execution
+  attempts    Int       @default(0)
+  maxRetries  Int       @default(3)
+  startedAt   DateTime?
+  completedAt DateTime?
+  workerId    String?
+
+  // Debugging
+  errorMessage String?
+
+  // Timestamps
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([status, startedAt])
+  @@index([completedAt])
+  @@index([createdAt])
+}

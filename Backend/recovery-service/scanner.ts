@@ -1,4 +1,7 @@
 import { connectRedis, redisClient } from "../shared/redis/redisClient";
+import { PrismaClient } from "../generated/prisma/client";
+
+import prisma from "../api-service/db";
 
 const STUCK_THRESHOLD = 10000; // 10 seconds
 
@@ -12,114 +15,150 @@ async function startScanner() {
 
   while (true) {
     try {
-      let cursor = "0";
+      const now = new Date();
 
-      do {
-        const jobKeys = await redisClient.scan(cursor, {
-          MATCH: "job:*",
-          COUNT: 100,
+      // threshold time = current time - 10 seconds
+      // any job started before this and still processing → considered stuck
+      const thresholdTime = new Date(Date.now() - STUCK_THRESHOLD);
+
+      // ============================================================
+      // 1. FIND QUEUED JOBS (MISSED / NEVER ENQUEUED)
+      // ============================================================
+
+      // Why do we scan QUEUED jobs?
+      // Scenario:
+      // API successfully writes job to DB
+      // BUT fails to push to Redis (network issue / crash)
+      // → Job is stuck in DB and never processed ❌
+
+      // So recovery system ensures:
+      // “Every QUEUED job eventually reaches Redis”
+
+      const queuedJobs = await prisma.job.findMany({
+        where: {
+          status: "QUEUED",
+        },
+        take: 50, // batch limit → prevents DB overload
+      });
+
+      for (const job of queuedJobs) {
+        // Why we blindly requeue without checking Redis?
+
+        // Because:
+        // 1. Redis does NOT guarantee accurate membership
+        // 2. Checking Redis is expensive (SCAN / lookup)
+        // 3. Distributed systems accept duplicates
+
+        // Instead we rely on:
+        // → Worker idempotency
+        // → DB status validation
+
+        await redisClient.rPush(
+          `${job.priority.toLowerCase()}_priority_queue`,
+          JSON.stringify({
+            id: job.id,
+            payload: job.payload,
+            priority: job.priority.toLowerCase(),
+          }),
+        );
+
+        console.log(`♻️ Re-enqueued QUEUED job: ${job.id}`);
+      }
+
+      // ============================================================
+      // 2. FIND STUCK JOBS (PROCESSING TOO LONG)
+      // ============================================================
+
+      // Scenario:
+      // Worker picks job → sets status = PROCESSING
+      // BUT crashes before completion 💥
+
+      // Result:
+      // Job is stuck forever in PROCESSING ❌
+
+      // So we detect:
+      // startedAt < thresholdTime → worker likely dead
+
+      const stuckJobs = await prisma.job.findMany({
+        where: {
+          status: "PROCESSING",
+          startedAt: {
+            lt: thresholdTime,
+          },
+        },
+        take: 50,
+      });
+
+      for (const job of stuckJobs) {
+        const lockKey = `lock:${job.id}`;
+        const activeLock = await redisClient.get(lockKey);
+
+        // Why check lock?
+
+        // If lock exists:
+        // → Worker is still processing
+        // → Maybe job is slow, NOT stuck
+
+        // Without this check:
+        // → We might requeue active jobs
+        // → Duplicate execution 💥
+
+        if (activeLock) {
+          console.log(`🔒 Job still active: ${job.id}`);
+          continue;
+        }
+
+        console.log(`⚠️ Stuck job detected: ${job.id}`);
+
+        // Reset job back to QUEUED
+
+        // Why not directly mark FAILED?
+        // Because:
+        // → Failure is uncertain (worker crash vs real failure)
+        // → safer to retry than lose job
+
+        await prisma.job.update({
+          where: { id: job.id },
+          data: {
+            status: "QUEUED",
+            errorMessage: "Recovered from stuck state",
+          },
         });
 
-        cursor = jobKeys.cursor;
-        const Keys = jobKeys.keys;
+        // Requeue job
 
-        for (const jobKey of Keys) {
-          const jobStateRaw = await redisClient.get(jobKey);
+        // Why duplication is safe here?
 
-          const jobState = jobStateRaw ? JSON.parse(jobStateRaw) : {};
+        // Because:
+        // Worker will:
+        // 1. Check DB status
+        // 2. Check processed key
+        // → Skip duplicates safely
 
-          // Only check processing jobs
-          if (jobState.status === "processing" && jobState.startedAt) {
-            const now = Date.now();
-            const startedAt = new Date(jobState.startedAt).getTime();
+        await redisClient.rPush(
+          `${job.priority.toLowerCase()}_priority_queue`,
+          JSON.stringify({
+            id: job.id,
+            payload: job.payload,
+            priority: job.priority.toLowerCase(),
+          }),
+        );
 
-            // Check if job is stuck
-            if (now - startedAt > STUCK_THRESHOLD) {
-              console.log(`⚠️ Stuck job detected: ${jobKey}`);
-
-              const jobId = jobState.jobData?.id;
-              if (!jobId) {
-                console.error(`❌ Missing job id for ${jobKey}`);
-                continue;
-              }
-              const lockKey = `lock:${jobId}`;
-              const activeLock = await redisClient.get(lockKey);
-
-              if (activeLock) {
-                console.log(
-                  `🔒 Job ${jobId} is still actively processing. Skipping recovery.`,
-                );
-                continue;
-              }
-
-              const isProcessed = await redisClient.exists(
-                `processed:${jobId}`,
-              );
-              // If job is already processed, just update state to completed and skip recovery
-              if (isProcessed) {
-                console.log(`✅ Job already processed: ${jobId}`);
-                await redisClient.set(
-                  `job:${jobId}`,
-                  JSON.stringify({
-                    ...jobState,
-                    status: "completed",
-                    result: "Job completed successfully",
-                    error: null,
-                    completedAt: new Date().toISOString(),
-                  }),
-                  { EX: 3600 },
-                );
-                continue;
-              }
-
-              // Update state
-              await redisClient.set(
-                jobKey,
-                JSON.stringify({
-                  ...jobState,
-                  status: "queued",
-                  error: "Recovered from stuck state",
-                }),
-                { EX: 3600 },
-              );
-
-              // Requeue job
-              const originalJob = jobState.jobData;
-
-              //“Why check if (originalJob)?”
-
-              // You say:
-              // “To ensure we only requeue valid job data. Without this check, undefined or malformed jobs could be pushed into the queue, causing worker crashes and system instability.”
-
-              //Even worse case:
-              //JSON.stringify(null) → "null"
-
-              //Worker:
-              // const job = JSON.parse("null"); // job = null
-
-              // Then:
-              // job.id ❌ → crash
-              // job.payload ❌ → crash
-              // 🧠 So That Check Prevents:
-              // Invalid job pushed to queue ❌
-              // Worker crashes ❌
-              // System instability ❌
-              if (originalJob) {
-                await redisClient.rPush(
-                  `${originalJob.priority}_priority_queue`,
-                  JSON.stringify(originalJob),
-                );
-                console.log(`♻️ Re-queued job: ${originalJob.id}`);
-              } else {
-                console.error(`❌ Missing jobData for ${jobKey}`);
-              }
-            }
-          }
-        }
-      } while (cursor !== "0");
+        console.log(`♻️ Recovered and re-queued job: ${job.id}`);
+      }
     } catch (err) {
       console.error("❌ Scanner error:", err);
     }
+
+    // Why delay between scans?
+
+    // Without delay:
+    // → Continuous DB hammering ❌
+    // → High CPU + DB load ❌
+
+    // With delay:
+    // → Controlled recovery cycles ✅
+    // → Better system stability ✅
 
     await sleep(5000);
   }
