@@ -16,7 +16,7 @@ enum JobStatus {
   QUEUED
   PROCESSING
   COMPLETED
-  FAILED
+  DLQ
 }
 
 enum JobPriority {
@@ -29,6 +29,7 @@ model Job {
   id String @id @default(uuid())
 
   // input
+  type     String
   payload  Json
   priority JobPriority @default(MEDIUM)
 
@@ -40,6 +41,7 @@ model Job {
   maxRetries  Int       @default(3)
   startedAt   DateTime?
   completedAt DateTime?
+  failedAt    DateTime?
   workerId    String?
 
   // Debugging
@@ -50,6 +52,7 @@ model Job {
   updatedAt DateTime @updatedAt
 
   @@index([status])
+  @@index([status, createdAt])
   @@index([status, startedAt])
   @@index([completedAt])
   @@index([createdAt])

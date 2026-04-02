@@ -1,6 +1,6 @@
 import { connectRedis, redisClient } from "../shared/redis/redisClient";
 import { processJob } from "./processors/jobProcessor";
-import prisma from "../api-service/db";
+import prisma from "../api-service/dbclient";
 
 console.log("🚀 WORKER FILE STARTED");
 
@@ -42,6 +42,7 @@ async function startWorker() {
   let index = 0;
 
   while (true) {
+    const delay = 2000 + Math.floor(Math.random() * 1000);
     let job: any = null;
 
     try {
@@ -134,7 +135,7 @@ async function startWorker() {
 
       const lockAcquired = await redisClient.set(lockKey, "worker", {
         NX: true,
-        EX: 30,
+        EX: 120,
       });
 
       /**
@@ -267,12 +268,11 @@ async function startWorker() {
            * Else:
            * → mark FAILED permanently
            */
-          if (attempts < maxRetries) {
-            const newAttempts = attempts + 1;
-
+          const newAttempts = attempts + 1;
+          if (newAttempts < maxRetries) {
             console.log(`🔁 Retrying job ${job.id}, attempt ${newAttempts}`);
 
-            await sleep(2000);
+            await sleep(delay);
 
             await prisma.job.update({
               where: { id: job.id },
@@ -280,9 +280,12 @@ async function startWorker() {
                 attempts: newAttempts,
                 status: "QUEUED",
                 errorMessage: error.message,
+                startedAt: null,
+                workerId: null,
               },
             });
 
+            job.attempts = newAttempts;
             /**
              * Requeue job
              *
@@ -298,21 +301,29 @@ async function startWorker() {
             /**
              * Max retries exceeded → permanent failure
              */
-            console.log(`💀 Job permanently failed: ${job.id}`);
-
+            // 💀 DLQ
+            console.log(`💀 Job moved to DLQ: ${job.id}`);
             await prisma.job.update({
               where: { id: job.id },
               data: {
-                status: "FAILED",
+                attempts: newAttempts,
+                status: "DLQ",
                 errorMessage: error.message,
+                failedAt: new Date(),
+                startedAt: null,
+                workerId: null,
               },
             });
           }
 
           /**
-           * Always release lock
+           * Always release lock AFTER DB update
            */
-          await redisClient.del(`lock:${job.id}`);
+          try {
+            await redisClient.del(`lock:${job.id}`);
+          } catch (e) {
+            console.error("⚠️ Failed to release lock", e);
+          }
         } catch (innerError) {
           console.error("❌ Error handling failed job:", innerError);
         }

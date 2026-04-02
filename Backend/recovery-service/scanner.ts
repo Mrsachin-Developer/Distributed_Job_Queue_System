@@ -1,7 +1,6 @@
 import { connectRedis, redisClient } from "../shared/redis/redisClient";
-import { PrismaClient } from "../generated/prisma/client";
 
-import prisma from "../api-service/db";
+import prisma from "../api-service/dbclient";
 
 const STUCK_THRESHOLD = 10000; // 10 seconds
 
@@ -37,7 +36,11 @@ async function startScanner() {
       const queuedJobs = await prisma.job.findMany({
         where: {
           status: "QUEUED",
+          createdAt: {
+            lt: new Date(Date.now() - 10000),
+          },
         },
+
         take: 50, // batch limit → prevents DB overload
       });
 
@@ -52,17 +55,21 @@ async function startScanner() {
         // Instead we rely on:
         // → Worker idempotency
         // → DB status validation
-
+        if (job.attempts >= job.maxRetries) {
+          continue;
+        }
         await redisClient.rPush(
           `${job.priority.toLowerCase()}_priority_queue`,
           JSON.stringify({
             id: job.id,
+            type: job.type,
             payload: job.payload,
             priority: job.priority.toLowerCase(),
           }),
         );
 
         console.log(`♻️ Re-enqueued QUEUED job: ${job.id}`);
+        await sleep(50);
       }
 
       // ============================================================
@@ -82,6 +89,7 @@ async function startScanner() {
       const stuckJobs = await prisma.job.findMany({
         where: {
           status: "PROCESSING",
+
           startedAt: {
             lt: thresholdTime,
           },
@@ -90,6 +98,9 @@ async function startScanner() {
       });
 
       for (const job of stuckJobs) {
+        if (job.attempts >= job.maxRetries) {
+          continue;
+        }
         const lockKey = `lock:${job.id}`;
         const activeLock = await redisClient.get(lockKey);
 
@@ -122,6 +133,8 @@ async function startScanner() {
           data: {
             status: "QUEUED",
             errorMessage: "Recovered from stuck state",
+            startedAt: null,
+            workerId: null,
           },
         });
 
@@ -139,6 +152,7 @@ async function startScanner() {
           `${job.priority.toLowerCase()}_priority_queue`,
           JSON.stringify({
             id: job.id,
+            type: job.type,
             payload: job.payload,
             priority: job.priority.toLowerCase(),
           }),
