@@ -1,6 +1,7 @@
 import { connectRedis, redisClient } from "../shared/redis/redisClient";
 import { processJob } from "./processors/jobProcessor";
 import prisma from "../api-service/dbclient";
+import { metrics } from "../shared/metrics/metrics";
 
 console.log("🚀 WORKER FILE STARTED");
 
@@ -77,9 +78,8 @@ async function startWorker() {
       console.log(`📥 Job received: ${job.id}`);
 
       /**
-       * ============================================================
-       * STEP 1: ATOMIC DB UPDATE (CRITICAL)
-       * ============================================================
+     
+       * ///////////// STEP 1: ATOMIC DB UPDATE (CRITICAL)
        *
        * This is the MOST IMPORTANT LINE in the entire system.
        *
@@ -93,6 +93,7 @@ async function startWorker() {
        * We do:
        * ✅ update IF status = QUEUED
        */
+
       const updated = await prisma.job.updateMany({
         where: {
           id: job.id,
@@ -115,6 +116,8 @@ async function startWorker() {
         console.log(`⚡ Job already taken: ${job.id}`);
         continue;
       }
+
+      await metrics.incrementProcessing(job.type);
 
       /**
        * ============================================================
@@ -200,7 +203,10 @@ async function startWorker() {
        * - This must be idempotent
        * - Because duplicates can still happen
        */
+
+      const start = Date.now();
       await processJob(job);
+      const duration = Date.now() - start;
 
       /**
        * ============================================================
@@ -217,7 +223,18 @@ async function startWorker() {
           errorMessage: null,
         },
       });
+      try {
+        await metrics.incrementProcessed(job.type);
+      } catch (e) {
+        console.error("Metrics error", e);
+      }
 
+      try {
+        await metrics.decrementProcessing(job.type);
+      } catch (e) {
+        console.error("Metrics decrement error", e);
+      }
+      await metrics.recordProcessingTime(job.type, duration);
       /**
        * ============================================================
        * STEP 6: MARK PROCESSED (REDIS)
@@ -241,6 +258,9 @@ async function startWorker() {
     } catch (error: any) {
       console.error("❌ Worker error:", error);
 
+      if (job?.type) {
+        await metrics.incrementFailed(job.type);
+      }
       if (job?.id) {
         try {
           /**
@@ -271,6 +291,7 @@ async function startWorker() {
           const newAttempts = attempts + 1;
           if (newAttempts < maxRetries) {
             console.log(`🔁 Retrying job ${job.id}, attempt ${newAttempts}`);
+            await metrics.incrementRetry(job.type);
 
             await sleep(delay);
 
@@ -302,7 +323,10 @@ async function startWorker() {
              * Max retries exceeded → permanent failure
              */
             // 💀 DLQ
+
             console.log(`💀 Job moved to DLQ: ${job.id}`);
+
+            await metrics.incrementDLQ(job.type);
             await prisma.job.update({
               where: { id: job.id },
               data: {
