@@ -1,4 +1,4 @@
-import { redisClient } from "../../shared/redis/redisClient";
+import { redisClient } from "../shared/redis/redisClient";
 
 const ALERT_KEY = "alert:failure_spike";
 
