@@ -2,18 +2,34 @@ import { redisClient } from "../redis/redisClient";
 
 class Metrics {
   async incrementProcessed(jobType: string) {
+    const bucket = getCurrentMinuteBucket();
+    const incrementKey = `metrics:processed:${bucket}`;
     try {
       await redisClient.hIncrBy("metrics:processed", jobType, 1);
       await redisClient.incr("metrics:processed_total");
+
+      await redisClient
+        .multi()
+        .incr(incrementKey)
+        .expire(incrementKey, 300)
+        .exec();
     } catch (e) {
       console.error("Metrics processed error", e);
     }
   }
 
   async incrementFailed(jobType: string) {
+    const bucket = getCurrentMinuteBucket();
+    const failedKey = `metrics:failed:${bucket}`;
+
     try {
-      await redisClient.hIncrBy("metrics:failed", jobType, 1);
-      await redisClient.incr("metrics:failed_total");
+      await redisClient
+        .multi()
+        .incr(failedKey)
+        .expire(failedKey, 300)
+        .hIncrBy("metrics:failed", jobType, 1)
+        .incr("metrics:failed_total")
+        .exec();
     } catch (e) {
       console.error("Metrics failed error", e);
     }
@@ -29,9 +45,17 @@ class Metrics {
   }
 
   async incrementRetry(jobType: string) {
+    const bucket = getCurrentMinuteBucket();
+    const retryKey = `metrics:retry:${bucket}`;
+
     try {
-      await redisClient.hIncrBy("metrics:retry", jobType, 1);
-      await redisClient.incr("metrics:retry_total");
+      await redisClient
+        .multi()
+        .incr(retryKey)
+        .expire(retryKey, 300)
+        .hIncrBy("metrics:retry", jobType, 1)
+        .incr("metrics:retry_total")
+        .exec();
     } catch (e) {
       console.error("Metrics retry error", e);
     }
@@ -94,4 +118,7 @@ class Metrics {
   }
 }
 
+function getCurrentMinuteBucket() {
+  return Math.floor(Date.now() / 60000);
+}
 export const metrics = new Metrics();

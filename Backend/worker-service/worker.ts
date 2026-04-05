@@ -291,6 +291,7 @@ async function startWorker() {
           const newAttempts = attempts + 1;
           if (newAttempts < maxRetries) {
             console.log(`🔁 Retrying job ${job.id}, attempt ${newAttempts}`);
+
             await metrics.incrementRetry(job.type);
 
             await sleep(delay);
