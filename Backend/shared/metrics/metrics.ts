@@ -17,7 +17,9 @@ class Metrics {
       console.error("Metrics processed error", e);
     }
   }
-
+  // These are the main metrics we want to track for each job type:
+  // 1. Processed Count: Number of jobs successfully processed.
+  // 2. Failed Count: Number of jobs that failed during processing.
   async incrementFailed(jobType: string) {
     const bucket = getCurrentMinuteBucket();
     const failedKey = `metrics:failed:${bucket}`;
