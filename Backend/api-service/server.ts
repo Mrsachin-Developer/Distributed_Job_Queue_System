@@ -3,6 +3,8 @@ import dotenv from "dotenv";
 import jobRouter from "./routes/job.routes";
 import metricsRouter from "./routes/metrics.routes";
 import { connectRedis, redisClient } from "../shared/redis/redisClient";
+import { rateLimitMiddleware } from "./middleware/rateLimitMiddleware";
+import { backPressureMiddleware } from "./middleware/backPressure.middleware";
 
 dotenv.config();
 
@@ -23,6 +25,9 @@ app.get("/health", async (req, res) => {
     res.status(500).json({ status: "DOWN" });
   }
 });
+
+app.use(rateLimitMiddleware);
+app.use(backPressureMiddleware);
 
 app.use("/jobs", jobRouter);
 app.use("/metrics", metricsRouter);
