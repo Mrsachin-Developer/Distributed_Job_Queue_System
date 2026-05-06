@@ -2,7 +2,7 @@ import { connectRedis, redisClient } from "../shared/redis/redisClient";
 import { processJob } from "./processors/jobProcessor";
 import prisma from "../api-service/dbclient";
 import { metrics } from "../shared/metrics/metrics";
-
+import { getPartitionedQueue } from "../shared/utils/partition";
 console.log("🚀 WORKER FILE STARTED");
 
 /**
@@ -30,14 +30,19 @@ async function startWorker() {
    * Without this → low priority jobs may never run ❌
    */
   const SCHEDULE = [
-    "high_priority_queue",
-    "high_priority_queue",
-    "high_priority_queue",
-    "high_priority_queue",
-    "high_priority_queue",
-    "medium_priority_queue",
-    "medium_priority_queue",
-    "low_priority_queue",
+    // HIGH PRIORITY (5x weight)
+    "high_priority_queue:0",
+    "high_priority_queue:1",
+    "high_priority_queue:2",
+    "high_priority_queue:3",
+    "high_priority_queue:0",
+
+    // MEDIUM PRIORITY (2x weight)
+    "medium_priority_queue:0",
+    "medium_priority_queue:1",
+
+    // LOW PRIORITY (1x weight)
+    "low_priority_queue:0",
   ];
 
   let index = 0;
@@ -315,10 +320,9 @@ async function startWorker() {
              * We allow duplicates here
              * Idempotency will handle safety
              */
-            await redisClient.rPush(
-              `${job.priority}_priority_queue`,
-              JSON.stringify(job),
-            );
+            const retryQueue = getPartitionedQueue(job.priority, job.userId);
+
+            await redisClient.rPush(retryQueue, JSON.stringify(job));
           } else {
             /**
              * Max retries exceeded → permanent failure

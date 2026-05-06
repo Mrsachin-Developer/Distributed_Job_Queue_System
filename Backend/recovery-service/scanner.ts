@@ -1,7 +1,7 @@
 import { connectRedis, redisClient } from "../shared/redis/redisClient";
 
 import prisma from "../api-service/dbclient";
-
+import { getPartitionedQueue } from "../shared/utils/partition";
 const STUCK_THRESHOLD = 10000; // 10 seconds
 
 async function sleep(ms: number) {
@@ -58,16 +58,21 @@ async function startScanner() {
         if (job.attempts >= job.maxRetries) {
           continue;
         }
+        const queueName = getPartitionedQueue(
+          job.priority.toLowerCase(),
+          job.userId,
+        );
+
         await redisClient.rPush(
-          `${job.priority.toLowerCase()}_priority_queue`,
+          queueName,
           JSON.stringify({
             id: job.id,
+            userId: job.userId,
             type: job.type,
             payload: job.payload,
             priority: job.priority.toLowerCase(),
           }),
         );
-
         console.log(`♻️ Re-enqueued QUEUED job: ${job.id}`);
         await sleep(50);
       }
@@ -148,10 +153,16 @@ async function startScanner() {
         // 2. Check processed key
         // → Skip duplicates safely
 
+        const queueName = getPartitionedQueue(
+          job.priority.toLowerCase(),
+          job.userId,
+        );
+
         await redisClient.rPush(
-          `${job.priority.toLowerCase()}_priority_queue`,
+          queueName,
           JSON.stringify({
             id: job.id,
+            userId: job.userId,
             type: job.type,
             payload: job.payload,
             priority: job.priority.toLowerCase(),

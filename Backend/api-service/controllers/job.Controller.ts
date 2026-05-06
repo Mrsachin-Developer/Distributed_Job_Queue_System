@@ -3,8 +3,9 @@ import { v4 as uuidv4 } from "uuid";
 import prisma from "../dbclient";
 import { addJobToQueue } from "../queue/jobQueue";
 import { JobPriority } from "../../generated/prisma/enums";
-
+import { getPartitionedQueue } from "../../shared/utils/partition";
 type Priority = "high" | "medium" | "low";
+
 
 const PRIORITY_DB_MAP: Record<Priority, JobPriority> = {
   high: JobPriority.HIGH,
@@ -24,7 +25,11 @@ export async function createJob(req: Request, res: Response) {
     if (!req.body.type) {
       return res.status(400).json({ message: "Job type is required" });
     }
-
+    if (typeof req.body.userId !== "string" || req.body.userId.trim() === "") {
+      return res.status(400).json({
+        message: "Valid userId is required",
+      });
+    }
     // Normalize priority
     let priority = (req.body.priority || "medium").toLowerCase();
 
@@ -36,6 +41,7 @@ export async function createJob(req: Request, res: Response) {
 
     const jobData = {
       id: jobId,
+      userId: req.body.userId,
       type: req.body.type,
       priority: safePriority,
       payload: req.body.payload || {},
@@ -48,8 +54,9 @@ export async function createJob(req: Request, res: Response) {
       data: {
         id: jobId,
         type: jobData.type,
+        userId: req.body.userId,
         payload: jobData.payload,
-        priority: PRIORITY_DB_MAP[safePriority], // ✅ FIX
+        priority: PRIORITY_DB_MAP[safePriority],
         status: "QUEUED",
         attempts: 0,
         maxRetries: req.body.maxRetries || 3,
@@ -60,7 +67,7 @@ export async function createJob(req: Request, res: Response) {
     /**
      * STEP 2: PUSH TO REDIS (EXECUTION LAYER)
      */
-    const queueName = PRIORITY_QUEUE_MAP[safePriority];
+    const queueName = getPartitionedQueue(safePriority, req.body.userId);
 
     await addJobToQueue(queueName, jobData);
 
@@ -70,6 +77,7 @@ export async function createJob(req: Request, res: Response) {
     return res.status(201).json({
       jobId,
       status: "QUEUED",
+      userId: req.body.userId,
       priority: safePriority,
     });
   } catch (error) {

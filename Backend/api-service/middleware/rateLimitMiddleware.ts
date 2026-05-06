@@ -2,9 +2,6 @@ import { Request, Response, NextFunction } from "express";
 import { redisClient } from "../../shared/redis/redisClient";
 import { tokenBucketScript } from "../../shared/redis/tokenBucket";
 
-const TOKENS_KEY = "rate:tokens";
-const TIMESTAMP_KEY = "rate:last_refill";
-
 const CAPACITY = 100;
 const REFILL_RATE = 10;
 
@@ -14,10 +11,21 @@ export async function rateLimitMiddleware(
   next: NextFunction,
 ) {
   try {
+    const userId = req.body.userId;
+
+    if (typeof userId !== "string" || userId.trim() === "") {
+      return res.status(400).json({
+        message: "Valid userId is required",
+      });
+    }
+
+    const tokensKey = `rate:${userId}:tokens`;
+    const timestampKey = `rate:${userId}:last_refill`;
+
     const now = Math.floor(Date.now() / 1000);
 
     const allowed = await redisClient.eval(tokenBucketScript, {
-      keys: [TOKENS_KEY, TIMESTAMP_KEY],
+      keys: [tokensKey, timestampKey],
       arguments: [CAPACITY.toString(), REFILL_RATE.toString(), now.toString()],
     });
 

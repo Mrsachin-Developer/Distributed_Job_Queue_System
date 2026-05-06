@@ -26,8 +26,9 @@ enum JobPriority {
 }
 
 model Job {
-  id String @id @default(uuid())
-
+  id       String      @id @default(uuid())
+  //ownership
+  userId   String
   // input
   type     String
   payload  Json
@@ -51,6 +52,8 @@ model Job {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([userId])
+  @@index([userId, status])
   @@index([status])
   @@index([status, createdAt])
   @@index([status, startedAt])
