@@ -41,7 +41,7 @@ export async function rateLimitMiddleware(
   } catch (e) {
     console.error("Rate limiter failed", e);
 
-    // fail open
+
     next();
   }
 }

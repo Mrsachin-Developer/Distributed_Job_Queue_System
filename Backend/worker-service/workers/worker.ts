@@ -1,9 +1,53 @@
-import { connectRedis, redisClient } from "../shared/redis/redisClient";
-import { processJob } from "./processors/jobProcessor";
-import prisma from "../api-service/dbclient";
-import { metrics } from "../shared/metrics/metrics";
-import { getPartitionedQueue } from "../shared/utils/partition";
+import crypto from "crypto";
+
+import { connectRedis, redisClient } from "../../shared/redis/redisClient";
+import { processJob } from "../processors/jobProcessor";
+import prisma from "../../api-service/dbclient";
+import { metrics } from "../../shared/metrics/metrics";
+import { getPartitionedQueue } from "../../shared/utils/partition";
+import {
+  claimPartition,
+  releasePartition,
+  renewPartitionLease,
+} from "../../shared/utils/partitionOwnership";
 console.log("🚀 WORKER FILE STARTED");
+
+const workerId = `worker-${crypto.randomUUID()}`;
+
+/**
+ * Weighted Scheduling (5:2:1)
+ *
+ * Why?
+ * - High priority should get more CPU time
+ * - BUT low priority should not starve
+ *
+ * Without this → low priority jobs may never run ❌
+ */
+
+const ALL_PARTITIONS = [
+  "high_priority_queue:0",
+  "high_priority_queue:1",
+  "high_priority_queue:2",
+  "high_priority_queue:3",
+  "medium_priority_queue:0",
+  "medium_priority_queue:1",
+  "low_priority_queue:0",
+];
+const SCHEDULE = [
+  // HIGH PRIORITY (5x weight)
+  "high_priority_queue:0",
+  "high_priority_queue:1",
+  "high_priority_queue:2",
+  "high_priority_queue:3",
+  "high_priority_queue:0",
+
+  // MEDIUM PRIORITY (2x weight)
+  "medium_priority_queue:0",
+  "medium_priority_queue:1",
+
+  // LOW PRIORITY (1x weight)
+  "low_priority_queue:0",
+];
 
 /**
  * Utility: prevents retry storms
@@ -14,36 +58,77 @@ async function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function shutdown() {
+  console.log(`🛑 Shutting down ${workerId}`);
+
+  for (const queue of ALL_PARTITIONS) {
+    await releasePartition(queue, workerId);
+  }
+
+  process.exit(0);
+}
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+async function startHeartbeat(ownedPartitions: Set<string>, workerId: string) {
+  while (true) {
+    try {
+      for (const queue of [...ownedPartitions]) {
+        console.log(`💓 Attempting renewal for ${queue}`);
+
+        const renewed = await renewPartitionLease(queue, workerId);
+
+        if (renewed) {
+          console.log(`✅ Renewed ${queue}`);
+        } else {
+          console.log(`${workerId} Lost ownership of ${queue}`);
+
+          ownedPartitions.delete(queue);
+
+          console.log(`❌ Failed renewal ${queue}`);
+        }
+      }
+    } catch (err) {
+      console.error("Heartbeat loop error", err);
+    }
+
+    await sleep(5000);
+  }
+}
+
+async function startClaimLoop(ownedPartitions: Set<string>, workerId: string) {
+  while (true) {
+    for (const queue of ALL_PARTITIONS) {
+      // Skip already owned
+      if (ownedPartitions.has(queue)) {
+        continue;
+      }
+
+      const claimed = await claimPartition(queue, workerId);
+
+      if (claimed) {
+        ownedPartitions.add(queue);
+
+        console.log(`${workerId} claimed ${queue}`);
+      }
+    }
+
+    await sleep(5000);
+  }
+}
+
 async function startWorker() {
   console.log("Starting worker...");
 
   await connectRedis();
   console.log("Worker connected to Redis");
 
-  /**
-   * Weighted Scheduling (5:2:1)
-   *
-   * Why?
-   * - High priority should get more CPU time
-   * - BUT low priority should not starve
-   *
-   * Without this → low priority jobs may never run ❌
-   */
-  const SCHEDULE = [
-    // HIGH PRIORITY (5x weight)
-    "high_priority_queue:0",
-    "high_priority_queue:1",
-    "high_priority_queue:2",
-    "high_priority_queue:3",
-    "high_priority_queue:0",
+  const ownedPartitions = new Set<string>();
 
-    // MEDIUM PRIORITY (2x weight)
-    "medium_priority_queue:0",
-    "medium_priority_queue:1",
-
-    // LOW PRIORITY (1x weight)
-    "low_priority_queue:0",
-  ];
+  //HearBeat
+  startHeartbeat(ownedPartitions, workerId);
+  startClaimLoop(ownedPartitions, workerId);
 
   let index = 0;
 
@@ -52,17 +137,16 @@ async function startWorker() {
     let job: any = null;
 
     try {
-      /**
-       * Pick queue based on weighted round robin
-       */
-      const queue = SCHEDULE[index];
+      const ownedQueues = Array.from(ownedPartitions);
 
-      /**
-       * Rotate index
-       * Example:
-       * 7 → (7+1)%8 = 0 → restart cycle
-       */
-      index = (index + 1) % SCHEDULE.length;
+      if (ownedQueues.length === 0) {
+        await sleep(1000);
+        continue;
+      }
+
+      const queue = ownedQueues[index % ownedQueues.length];
+
+      index = (index + 1) % ownedQueues.length;
 
       /**
        * BLPOP (blocking pop with timeout)
@@ -71,6 +155,7 @@ async function startWorker() {
        * - Avoid blocking forever
        * - Allows loop to continue and switch queues
        */
+      console.log(`👀 ${workerId} polling ${queue}`);
       const result = await redisClient.blPop(queue, 1);
 
       if (!result) continue;
@@ -107,7 +192,7 @@ async function startWorker() {
         data: {
           status: "PROCESSING",
           startedAt: new Date(),
-          workerId: `worker-${process.pid}`, // dynamic worker identity
+          workerId, // dynamic worker identity
           errorMessage: null,
         },
       });
