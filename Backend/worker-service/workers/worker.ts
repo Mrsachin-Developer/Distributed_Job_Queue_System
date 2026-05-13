@@ -10,10 +10,18 @@ import {
   releasePartition,
   renewPartitionLease,
 } from "../../shared/utils/partitionOwnership";
+import {
+  getActiveWorkers,
+  registerWorker,
+  removeWorker,
+  renewWorkerHeartbeat,
+} from "../../shared/cluster/workerRegistry";
 console.log("🚀 WORKER FILE STARTED");
 
 const workerId = `worker-${crypto.randomUUID()}`;
 
+let heartbeatInterval: NodeJS.Timeout;
+let isShuttingDown = false;
 /**
  * Weighted Scheduling (5:2:1)
  *
@@ -59,20 +67,25 @@ async function sleep(ms: number) {
 }
 
 async function shutdown() {
+  isShuttingDown = true;
+
   console.log(`🛑 Shutting down ${workerId}`);
 
   for (const queue of ALL_PARTITIONS) {
     await releasePartition(queue, workerId);
   }
 
+  await removeWorker(workerId);
+
+  clearInterval(heartbeatInterval);
+
   process.exit(0);
 }
-
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 async function startHeartbeat(ownedPartitions: Set<string>, workerId: string) {
-  while (true) {
+  while (!isShuttingDown) {
     try {
       for (const queue of [...ownedPartitions]) {
         console.log(`💓 Attempting renewal for ${queue}`);
@@ -98,20 +111,36 @@ async function startHeartbeat(ownedPartitions: Set<string>, workerId: string) {
 }
 
 async function startClaimLoop(ownedPartitions: Set<string>, workerId: string) {
-  while (true) {
-    for (const queue of ALL_PARTITIONS) {
-      // Skip already owned
-      if (ownedPartitions.has(queue)) {
+  while (!isShuttingDown) {
+    try {
+      const workers = await getActiveWorkers();
+      if (workers.length === 0) {
+        await sleep(1000);
         continue;
       }
+      const fairShare = Math.ceil(ALL_PARTITIONS.length / workers.length);
 
-      const claimed = await claimPartition(queue, workerId);
+      for (const queue of ALL_PARTITIONS) {
+        // Already own it
+        if (ownedPartitions.has(queue)) {
+          continue;
+        }
 
-      if (claimed) {
-        ownedPartitions.add(queue);
+        // Reached fair limit
+        if (ownedPartitions.size >= fairShare) {
+          break;
+        }
 
-        console.log(`${workerId} claimed ${queue}`);
+        const claimed = await claimPartition(queue, workerId);
+
+        if (claimed) {
+          ownedPartitions.add(queue);
+
+          console.log(`${workerId} claimed ${queue}`);
+        }
       }
+    } catch (err) {
+      console.error("Claim loop error", err);
     }
 
     await sleep(5000);
@@ -124,15 +153,26 @@ async function startWorker() {
   await connectRedis();
   console.log("Worker connected to Redis");
 
+  await registerWorker(workerId);
+  heartbeatInterval = setInterval(async () => {
+    if (isShuttingDown) return;
+
+    try {
+      await renewWorkerHeartbeat(workerId);
+    } catch (err) {
+      console.error("Worker heartbeat failed", err);
+    }
+  }, 5000);
+
   const ownedPartitions = new Set<string>();
 
   //HearBeat
-  startHeartbeat(ownedPartitions, workerId);
-  startClaimLoop(ownedPartitions, workerId);
+  void startHeartbeat(ownedPartitions, workerId);
+  void startClaimLoop(ownedPartitions, workerId);
 
   let index = 0;
 
-  while (true) {
+  while (!isShuttingDown) {
     const delay = 2000 + Math.floor(Math.random() * 1000);
     let job: any = null;
 
