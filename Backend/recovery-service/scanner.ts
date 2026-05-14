@@ -123,7 +123,14 @@ async function startScanner() {
           console.log(`🔒 Job still active: ${job.id}`);
           continue;
         }
+        const workerAlive = await redisClient.exists(
+          `active_worker:${job.workerId}`,
+        );
 
+        if (workerAlive) {
+          console.log(`🟢 Worker still alive for job ${job.id}`);
+          continue;
+        }
         console.log(`⚠️ Stuck job detected: ${job.id}`);
 
         // Reset job back to QUEUED
