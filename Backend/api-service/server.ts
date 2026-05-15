@@ -25,7 +25,6 @@ app.get("/health", async (req, res) => {
     res.status(500).json({ status: "DOWN" });
   }
 });
-
 app.use(rateLimitMiddleware);
 app.use(backPressureMiddleware);
 

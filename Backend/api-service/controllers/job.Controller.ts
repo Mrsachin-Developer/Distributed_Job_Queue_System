@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import prisma from "../dbclient";
 import { addJobToQueue } from "../queue/jobQueue";
-import { JobPriority } from "../../generated/prisma/enums";
+import { JobPriority } from "../../generated/prisma/index";
 import { getPartitionedQueue } from "../../shared/utils/partition";
 type Priority = "high" | "medium" | "low";
 
