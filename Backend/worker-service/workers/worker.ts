@@ -169,6 +169,39 @@ async function startWorker() {
   //HearBeat
   void startHeartbeat(ownedPartitions, workerId);
   void startClaimLoop(ownedPartitions, workerId);
+  void startRebalance(workerId, ownedPartitions);
+  async function startRebalance(
+    workerId: string,
+    ownedPartitions: Set<string>,
+  ) {
+    while (!isShuttingDown) {
+      try {
+        const workers = await getActiveWorkers();
+        if (workers.length === 0) {
+          await sleep(5000);
+          continue;
+        }
+        const fairShare = Math.ceil(ALL_PARTITIONS.length / workers.length);
+
+        const maxAllowedPartition = fairShare + 1;
+
+        if (ownedPartitions.size > maxAllowedPartition) {
+          const partitionToRelease = [...ownedPartitions][0];
+          console.log(
+            `⚖️ ${workerId} releasing ${partitionToRelease} for rebalance`,
+          );
+
+          await releasePartition(partitionToRelease, workerId);
+
+          ownedPartitions.delete(partitionToRelease);
+        }
+      } catch (error) {
+        console.error("Rebalance loop error", error);
+      }
+
+      await sleep(10000);
+    }
+  }
 
   let index = 0;
 
