@@ -143,10 +143,6 @@ export async function createBatchJobs(req: Request, res: Response) {
      * Bulk insert into PostgreSQL
      */
 
-    console.log("1. Request validated");
-
-    console.log("2. Before createMany");
-
     await prisma.job.createMany({
       data: validJobs.map((job) => ({
         id: job.id,
@@ -161,11 +157,6 @@ export async function createBatchJobs(req: Request, res: Response) {
       })),
     });
 
-    console.log("3. After createMany");
-    console.log(
-      "4. Queue:",
-      getPartitionedQueue(validJobs[0].priority, validJobs[0].userId),
-    );
     /**
      * STEP 2
      * Push every job to Redis in parallel
@@ -183,7 +174,7 @@ export async function createBatchJobs(req: Request, res: Response) {
         });
       }),
     );
-    console.log("5. Redis enqueue complete");
+
     return res.status(201).json({
       message: "Batch processing completed",
       totalReceived: jobs.length,
