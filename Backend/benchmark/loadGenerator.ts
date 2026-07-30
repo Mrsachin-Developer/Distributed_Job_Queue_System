@@ -9,6 +9,14 @@ interface PriorityAllocation {
   count: number; // without decimal
   remainder: number;
 }
+
+interface LoadGeneratorResult {
+  totalJobs: number;
+  totalBatches: number;
+  successfulBatches: number;
+  failedBatches: number;
+}
+
 function generateProcessingTime(): number {
   const { MIN, MAX } = benchmarkConfig.PROCESSING_TIME_MS;
 
@@ -93,54 +101,72 @@ function generatePriorityDistribution(): Priority[] {
 }
 
 interface BenchmarkJob {
-  id: string;
+  type: string;
   priority: Priority;
-  processingTime: number;
   payload: BenchmarkPayload;
 }
 interface BenchmarkPayload {
   source: "benchmark";
+  processingTime: number;
 }
-export async function generateLoad() {
+export async function generateLoad(): Promise<LoadGeneratorResult> {
+  let totalBatches = 0;
+  let successfulBatches = 0;
+  let failedBatches = 0;
   const { TOTAL_JOBS, BATCH_SIZE, BATCH_DELAY_MS, API_URL } = benchmarkConfig;
 
   const priorities = generatePriorityDistribution();
 
   const batch: BenchmarkJob[] = [];
-  let jobCounter = 1;
+ 
   for (const priority of priorities) {
     const job: BenchmarkJob = {
-      id: `job-${jobCounter}`,
+      type: "benchmark",
       priority,
-      processingTime: generateProcessingTime(),
       payload: {
         source: "benchmark",
+        processingTime: generateProcessingTime(),
       },
     };
 
-    jobCounter++;
+   
 
     batch.push(job);
 
     if (batch.length === BATCH_SIZE) {
+      totalBatches++;
       try {
         await axios.post(API_URL, {
+          userId: "benchmark-user",
           jobs: batch,
         });
+        successfulBatches++;
       } catch (error) {
         console.error("Failed to submit batch:", error);
+        failedBatches++;
       }
       batch.length = 0;
       await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
     }
   }
   if (batch.length > 0) {
+    totalBatches++;
     try {
       await axios.post(API_URL, {
+        userId: "benchmark-user",
         jobs: batch,
       });
+      successfulBatches++;
     } catch (error) {
+      failedBatches++;
       console.error("Failed to submit final batch:", error);
     }
   }
+
+  return {
+    totalJobs: TOTAL_JOBS,
+    totalBatches,
+    successfulBatches,
+    failedBatches,
+  };
 }

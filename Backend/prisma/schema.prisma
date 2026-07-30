@@ -1,8 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client-js"
   output   = "../generated/prisma"
@@ -10,6 +5,32 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+}
+
+model Job {
+  id           String      @id @default(uuid())
+  payload      Json
+  priority     JobPriority @default(MEDIUM)
+  status       JobStatus   @default(QUEUED)
+  attempts     Int         @default(0)
+  maxRetries   Int         @default(3)
+  startedAt    DateTime?
+  completedAt  DateTime?
+  workerId     String?
+  errorMessage String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  failedAt     DateTime?
+  type         String
+  userId       String
+
+  @@index([userId])
+  @@index([userId, status])
+  @@index([status])
+  @@index([status, createdAt])
+  @@index([status, startedAt])
+  @@index([completedAt])
+  @@index([createdAt])
 }
 
 enum JobStatus {
@@ -23,40 +44,4 @@ enum JobPriority {
   LOW
   MEDIUM
   HIGH
-}
-
-model Job {
-  id       String      @id @default(uuid())
-  //ownership
-  userId   String
-  // input
-  type     String
-  payload  Json
-  priority JobPriority @default(MEDIUM)
-
-  // State
-  status JobStatus @default(QUEUED)
-
-  // Execution
-  attempts    Int       @default(0)
-  maxRetries  Int       @default(3)
-  startedAt   DateTime?
-  completedAt DateTime?
-  failedAt    DateTime?
-  workerId    String?
-
-  // Debugging
-  errorMessage String?
-
-  // Timestamps
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([userId])
-  @@index([userId, status])
-  @@index([status])
-  @@index([status, createdAt])
-  @@index([status, startedAt])
-  @@index([completedAt])
-  @@index([createdAt])
 }

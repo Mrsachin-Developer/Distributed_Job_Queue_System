@@ -10,13 +10,33 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+app.use((req, res, next) => {
+  console.log("================================");
+  console.log("REQUEST RECEIVED");
+  console.log(req.method, req.originalUrl);
+  console.log("================================");
+  next();
+});
+app.use(
+  express.json({
+    limit: "10mb",
+  }),
+);
+app.use((err: any, req: any, res: any, next: any) => {
+  console.error("JSON PARSE ERROR");
+  console.error(err);
 
-app.use(express.json());
-
+  res.status(400).json({
+    message: err.message,
+  });
+});
 app.get("/", (req, res) => {
   res.send("API is running");
 });
-
+app.use((req, res, next) => {
+  console.log("REQUEST RECEIVED");
+  next();
+});
 app.get("/health", async (req, res) => {
   try {
     await redisClient.ping();
@@ -33,11 +53,14 @@ app.use("/metrics", metricsRouter);
 
 // global error handler
 app.use((err: any, req: any, res: any, next: any) => {
-  console.error("Unhandled error:", err);
+  console.error("===== GLOBAL ERROR =====");
+  console.error(err);
+  console.error("Message:", err.message);
+  console.error("Stack:", err.stack);
 
-  res.status(500).json({
+  res.status(err.status || 500).json({
     success: false,
-    message: "Internal Server Error",
+    message: err.message,
   });
 });
 

@@ -9,7 +9,10 @@ export async function processJob(job: any) {
     case "IMAGE":
       await handleImage(job.payload);
       break;
-
+    case "benchmark":
+      // Used only for benchmarking
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      break;
     default:
       console.log("Unknown job type");
   }

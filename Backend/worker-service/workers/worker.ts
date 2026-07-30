@@ -1,5 +1,5 @@
 import crypto from "crypto";
-
+import "dotenv/config";
 import { connectRedis, redisClient } from "../../shared/redis/redisClient";
 import { processJob } from "../processors/jobProcessor";
 import prisma from "../../api-service/dbclient";
@@ -17,7 +17,7 @@ import {
   renewWorkerHeartbeat,
 } from "../../shared/cluster/workerRegistry";
 console.log("🚀 WORKER FILE STARTED");
-
+console.log("DATABASE_URL:", process.env.DATABASE_URL);
 const workerId = `worker-${crypto.randomUUID()}`;
 
 let heartbeatInterval: NodeJS.Timeout;

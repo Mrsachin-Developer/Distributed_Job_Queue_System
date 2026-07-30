@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { createJob } from "../controllers/job.Controller";
+import { createBatchJobs, createJob } from "../controllers/job.Controller";
 
-const router=Router();
+const router = Router();
 
-
-router.post("/",createJob);
+router.post("/", createJob);
+router.post("/batch", createBatchJobs);
 
 export default router;
