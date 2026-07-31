@@ -10,13 +10,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.use((req, res, next) => {
-  console.log("================================");
-  console.log("REQUEST RECEIVED");
-  console.log(req.method, req.originalUrl);
-  console.log("================================");
-  next();
-});
+
 app.use(
   express.json({
     limit: "10mb",
@@ -45,10 +39,9 @@ app.get("/health", async (req, res) => {
     res.status(500).json({ status: "DOWN" });
   }
 });
-app.use(rateLimitMiddleware);
-app.use(backPressureMiddleware);
 
-app.use("/jobs", jobRouter);
+app.use("/jobs", rateLimitMiddleware, backPressureMiddleware, jobRouter);
+
 app.use("/metrics", metricsRouter);
 
 // global error handler

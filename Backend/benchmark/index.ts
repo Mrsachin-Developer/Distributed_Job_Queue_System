@@ -1,3 +1,3 @@
-import { runBenchMark } from "./benchMarkRunner";
+import { runBenchMark } from "./benchmarkRunner";
 
 runBenchMark();

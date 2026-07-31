@@ -1,5 +1,9 @@
 import { Request, Response } from "express";
 import { metrics } from "../../shared/metrics/metrics";
+import {
+  register,
+  updateMetricsFromRedis,
+} from "../../shared/metrics/prometheus";
 
 let cachedMetrics: any = null;
 let lastFetchTime = 0;
@@ -32,7 +36,6 @@ export async function getMetrics(req: Request, res: Response) {
       data,
       cached: false,
     });
-
   } catch (error) {
     console.error("Metrics error:", error);
 
@@ -40,5 +43,20 @@ export async function getMetrics(req: Request, res: Response) {
       success: false,
       message: "Metrics unavailable",
     });
+  }
+}
+
+export async function getPrometheusMetrics(req: Request, res: Response) {
+  try {
+    // Sync Redis -> Prometheus Gauges
+    await updateMetricsFromRedis();
+
+    res.set("Content-Type", register.contentType);
+
+    res.end(await register.metrics());
+  } catch (error) {
+    console.error("Prometheus metrics error:", error);
+
+    res.status(503).send("Metrics unavailable");
   }
 }

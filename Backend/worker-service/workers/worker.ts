@@ -4,6 +4,11 @@ import { connectRedis, redisClient } from "../../shared/redis/redisClient";
 import { processJob } from "../processors/jobProcessor";
 import prisma from "../../api-service/dbclient";
 import { metrics } from "../../shared/metrics/metrics";
+import {
+  jobDuration,
+  dbDuration,
+  businessLogicDuration,
+} from "../../shared/metrics/prometheus";
 import { getPartitionedQueue } from "../../shared/utils/partition";
 import {
   claimPartition,
@@ -33,13 +38,23 @@ let isShuttingDown = false;
  */
 
 const ALL_PARTITIONS = [
+  // High
   "high_priority_queue:0",
   "high_priority_queue:1",
   "high_priority_queue:2",
   "high_priority_queue:3",
+
+  // Medium
   "medium_priority_queue:0",
   "medium_priority_queue:1",
+  "medium_priority_queue:2",
+  "medium_priority_queue:3",
+
+  // Low
   "low_priority_queue:0",
+  "low_priority_queue:1",
+  "low_priority_queue:2",
+  "low_priority_queue:3",
 ];
 const SCHEDULE = [
   // HIGH PRIORITY (5x weight)
@@ -208,7 +223,7 @@ async function startWorker() {
   while (!isShuttingDown) {
     const delay = 2000 + Math.floor(Math.random() * 1000);
     let job: any = null;
-
+    const endJobTimer = jobDuration.startTimer();
     try {
       const ownedQueues = Array.from(ownedPartitions);
 
@@ -229,7 +244,7 @@ async function startWorker() {
        * - Allows loop to continue and switch queues
        */
       console.log(`👀 ${workerId} polling ${queue}`);
-      const result = await redisClient.blPop(queue, 1);
+      const result = await redisClient.blPop(queue, 0.1);
 
       if (!result) continue;
 
@@ -239,6 +254,8 @@ async function startWorker() {
       job = JSON.parse(result.element);
 
       console.log(`📥 Job received: ${job.id}`);
+
+      const totalStart = performance.now();
 
       /**
      
@@ -257,6 +274,11 @@ async function startWorker() {
        * ✅ update IF status = QUEUED
        */
 
+      const dbProcessingStart = performance.now();
+      const endDbProcessing = dbDuration.startTimer({
+        operation: "update_processing",
+      });
+
       const updated = await prisma.job.updateMany({
         where: {
           id: job.id,
@@ -270,6 +292,12 @@ async function startWorker() {
         },
       });
 
+      endDbProcessing();
+      console.log(
+        "DB -> PROCESSING:",
+        (performance.now() - dbProcessingStart).toFixed(2),
+        "ms",
+      );
       /**
        * If no rows updated:
        * → another worker already took this job
@@ -297,6 +325,7 @@ async function startWorker() {
        * - duplicate execution
        * - race due to retries
        */
+      const redisStart = performance.now();
       const lockKey = `lock:${job.id}`;
 
       const lockAcquired = await redisClient.set(lockKey, "worker", {
@@ -351,7 +380,13 @@ async function startWorker() {
         /**
          * Always release lock before skipping
          */
+
         await redisClient.del(lockKey);
+        console.log(
+          "Redis:",
+          (performance.now() - redisStart).toFixed(2),
+          "ms",
+        );
         continue;
       }
 
@@ -366,11 +401,16 @@ async function startWorker() {
        * - This must be idempotent
        * - Because duplicates can still happen
        */
+      const processStart = performance.now();
+      const endBusinessTimer = businessLogicDuration.startTimer();
 
-      const start = Date.now();
       await processJob(job);
-      const duration = Date.now() - start;
 
+      endBusinessTimer();
+
+      const duration = performance.now() - processStart;
+
+      console.log("Business Logic:", duration.toFixed(2), "ms");
       /**
        * ============================================================
        * STEP 5: MARK COMPLETED (DB)
@@ -378,6 +418,11 @@ async function startWorker() {
        *
        * DB is source of truth
        */
+
+      const dbCompleteStart = performance.now();
+      const endDbCompleted = dbDuration.startTimer({
+        operation: "update_completed",
+      });
       await prisma.job.update({
         where: { id: job.id },
         data: {
@@ -386,6 +431,12 @@ async function startWorker() {
           errorMessage: null,
         },
       });
+      endDbCompleted();
+      console.log(
+        "DB -> COMPLETED:",
+        (performance.now() - dbCompleteStart).toFixed(2),
+        "ms",
+      );
       try {
         await metrics.incrementProcessed(job.type);
       } catch (e) {
@@ -410,14 +461,24 @@ async function startWorker() {
        */
       await redisClient.set(`processed:${job.id}`, "true", { EX: 3600 });
 
-      console.log(`✅ Job completed: ${job.id}`);
+   
 
       /**
        * ============================================================
        * STEP 7: RELEASE LOCK
        * ============================================================
        */
+
       await redisClient.del(lockKey);
+      console.log("Redis:", (performance.now() - redisStart).toFixed(2), "ms");
+
+      console.log(`✅ Job completed: ${job.id}`);
+
+      console.log(
+        "TOTAL JOB TIME:",
+        (performance.now() - totalStart).toFixed(2),
+        "ms",
+      );
     } catch (error: any) {
       console.error("❌ Worker error:", error);
 
@@ -515,6 +576,8 @@ async function startWorker() {
           console.error("❌ Error handling failed job:", innerError);
         }
       }
+    } finally {
+      endJobTimer();
     }
   }
 }

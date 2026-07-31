@@ -65,12 +65,15 @@ class Metrics {
 
   async recordProcessingTime(jobType: string, durationMs: number) {
     try {
-      await redisClient.hIncrBy("metrics:processing_time", jobType, durationMs);
+      await redisClient.hIncrByFloat(
+        "metrics:processing_time",
+        jobType,
+        durationMs,
+      );
     } catch (e) {
       console.error("Metrics duration error", e);
     }
   }
-
   async incrementProcessing(jobType: string) {
     try {
       await redisClient.hIncrBy("metrics:processing", jobType, 1);

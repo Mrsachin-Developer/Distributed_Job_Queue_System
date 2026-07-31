@@ -1,9 +1,9 @@
 export const benchmarkConfig = {
-  TOTAL_JOBS: 1000,
+  TOTAL_JOBS: 10,
 
-  BATCH_SIZE: 500,
+  BATCH_SIZE: 1,
   API_URL: "http://localhost:3000/jobs/batch",
-  BATCH_DELAY_MS: 100,
+  BATCH_DELAY_MS: 0,
   POLL_INTERVAL_MS: 1000,
   BENCHMARK_TIMEOUT_MS: 5 * 60 * 1000,
 
@@ -14,7 +14,7 @@ export const benchmarkConfig = {
   },
 
   PROCESSING_TIME_MS: {
-    MIN: 10,
-    MAX: 50,
+    MIN: 0,
+    MAX: 10,
   },
 };

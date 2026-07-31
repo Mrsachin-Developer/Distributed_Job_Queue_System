@@ -11,6 +11,7 @@ interface PriorityAllocation {
 }
 
 interface LoadGeneratorResult {
+  benchmarkUserId: string;
   totalJobs: number;
   totalBatches: number;
   successfulBatches: number;
@@ -110,6 +111,7 @@ interface BenchmarkPayload {
   processingTime: number;
 }
 export async function generateLoad(): Promise<LoadGeneratorResult> {
+  const benchmarkUserId = `benchmark-${Date.now()}`;
   let totalBatches = 0;
   let successfulBatches = 0;
   let failedBatches = 0;
@@ -118,7 +120,7 @@ export async function generateLoad(): Promise<LoadGeneratorResult> {
   const priorities = generatePriorityDistribution();
 
   const batch: BenchmarkJob[] = [];
- 
+
   for (const priority of priorities) {
     const job: BenchmarkJob = {
       type: "benchmark",
@@ -129,15 +131,14 @@ export async function generateLoad(): Promise<LoadGeneratorResult> {
       },
     };
 
-   
-
     batch.push(job);
 
     if (batch.length === BATCH_SIZE) {
       totalBatches++;
+
       try {
         await axios.post(API_URL, {
-          userId: "benchmark-user",
+          userId: benchmarkUserId,
           jobs: batch,
         });
         successfulBatches++;
@@ -153,7 +154,7 @@ export async function generateLoad(): Promise<LoadGeneratorResult> {
     totalBatches++;
     try {
       await axios.post(API_URL, {
-        userId: "benchmark-user",
+        userId: benchmarkUserId,
         jobs: batch,
       });
       successfulBatches++;
@@ -164,6 +165,7 @@ export async function generateLoad(): Promise<LoadGeneratorResult> {
   }
 
   return {
+    benchmarkUserId,
     totalJobs: TOTAL_JOBS,
     totalBatches,
     successfulBatches,
