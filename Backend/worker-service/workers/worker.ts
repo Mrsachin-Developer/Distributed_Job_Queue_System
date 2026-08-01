@@ -21,6 +21,8 @@ import {
   removeWorker,
   renewWorkerHeartbeat,
 } from "../../shared/cluster/workerRegistry";
+
+import { Scheduler } from "../scheduler/schedular";
 console.log("🚀 WORKER FILE STARTED");
 console.log("DATABASE_URL:", process.env.DATABASE_URL);
 const workerId = `worker-${crypto.randomUUID()}`;
@@ -56,21 +58,6 @@ const ALL_PARTITIONS = [
   "low_priority_queue:2",
   "low_priority_queue:3",
 ];
-const SCHEDULE = [
-  // HIGH PRIORITY (5x weight)
-  "high_priority_queue:0",
-  "high_priority_queue:1",
-  "high_priority_queue:2",
-  "high_priority_queue:3",
-  "high_priority_queue:0",
-
-  // MEDIUM PRIORITY (2x weight)
-  "medium_priority_queue:0",
-  "medium_priority_queue:1",
-
-  // LOW PRIORITY (1x weight)
-  "low_priority_queue:0",
-];
 
 /**
  * Utility: prevents retry storms
@@ -99,7 +86,11 @@ async function shutdown() {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-async function startHeartbeat(ownedPartitions: Set<string>, workerId: string) {
+async function startHeartbeat(
+  ownedPartitions: Set<string>,
+  workerId: string,
+  scheduler: Scheduler,
+) {
   while (!isShuttingDown) {
     try {
       for (const queue of [...ownedPartitions]) {
@@ -114,6 +105,8 @@ async function startHeartbeat(ownedPartitions: Set<string>, workerId: string) {
 
           ownedPartitions.delete(queue);
 
+          scheduler.updateQueues(Array.from(ownedPartitions));
+
           console.log(`❌ Failed renewal ${queue}`);
         }
       }
@@ -125,7 +118,11 @@ async function startHeartbeat(ownedPartitions: Set<string>, workerId: string) {
   }
 }
 
-async function startClaimLoop(ownedPartitions: Set<string>, workerId: string) {
+async function startClaimLoop(
+  ownedPartitions: Set<string>,
+  workerId: string,
+  scheduler: Scheduler,
+) {
   while (!isShuttingDown) {
     try {
       const workers = await getActiveWorkers();
@@ -147,9 +144,10 @@ async function startClaimLoop(ownedPartitions: Set<string>, workerId: string) {
         }
 
         const claimed = await claimPartition(queue, workerId);
-
         if (claimed) {
           ownedPartitions.add(queue);
+
+          scheduler.updateQueues(Array.from(ownedPartitions));
 
           console.log(`${workerId} claimed ${queue}`);
         }
@@ -181,13 +179,18 @@ async function startWorker() {
 
   const ownedPartitions = new Set<string>();
 
+  const scheduler = new Scheduler();
+
   //HearBeat
-  void startHeartbeat(ownedPartitions, workerId);
-  void startClaimLoop(ownedPartitions, workerId);
-  void startRebalance(workerId, ownedPartitions);
+  void startHeartbeat(ownedPartitions, workerId, scheduler);
+
+  void startClaimLoop(ownedPartitions, workerId, scheduler);
+
+  void startRebalance(workerId, ownedPartitions, scheduler);
   async function startRebalance(
     workerId: string,
     ownedPartitions: Set<string>,
+    scheduler: Scheduler,
   ) {
     while (!isShuttingDown) {
       try {
@@ -209,6 +212,8 @@ async function startWorker() {
           await releasePartition(partitionToRelease, workerId);
 
           ownedPartitions.delete(partitionToRelease);
+
+          scheduler.updateQueues(Array.from(ownedPartitions));
         }
       } catch (error) {
         console.error("Rebalance loop error", error);
@@ -218,23 +223,19 @@ async function startWorker() {
     }
   }
 
-  let index = 0;
-
   while (!isShuttingDown) {
     const delay = 2000 + Math.floor(Math.random() * 1000);
     let job: any = null;
-    const endJobTimer = jobDuration.startTimer();
-    try {
-      const ownedQueues = Array.from(ownedPartitions);
 
-      if (ownedQueues.length === 0) {
-        await sleep(1000);
+    const endJobTimer = jobDuration.startTimer();
+
+    try {
+      const queue = scheduler.nextQueue();
+
+      if (!queue) {
+        await sleep(500); // Same as BACKOFF_MS
         continue;
       }
-
-      const queue = ownedQueues[index % ownedQueues.length];
-
-      index = (index + 1) % ownedQueues.length;
 
       /**
        * BLPOP (blocking pop with timeout)
@@ -244,9 +245,14 @@ async function startWorker() {
        * - Allows loop to continue and switch queues
        */
       console.log(`👀 ${workerId} polling ${queue}`);
-      const result = await redisClient.blPop(queue, 0.1);
 
-      if (!result) continue;
+      const result = await redisClient.blPop(queue, 1);
+
+      scheduler.recordResult(queue, !!result);
+
+      if (!result) {
+        continue;
+      }
 
       /**
        * Parse job from Redis
@@ -460,8 +466,6 @@ async function startWorker() {
        * Helps skip duplicate jobs quickly
        */
       await redisClient.set(`processed:${job.id}`, "true", { EX: 3600 });
-
-   
 
       /**
        * ============================================================
