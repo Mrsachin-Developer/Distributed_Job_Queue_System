@@ -23,6 +23,8 @@ import {
 } from "../../shared/cluster/workerRegistry";
 
 import { Scheduler } from "../scheduler/schedular";
+import { startMetricsServer } from "../../shared/metrics/metricsServer";
+
 console.log("🚀 WORKER FILE STARTED");
 console.log("DATABASE_URL:", process.env.DATABASE_URL);
 const workerId = `worker-${crypto.randomUUID()}`;
@@ -281,24 +283,30 @@ async function startWorker() {
        */
 
       const dbProcessingStart = performance.now();
+
+      let updated;
+
       const endDbProcessing = dbDuration.startTimer({
         operation: "update_processing",
       });
 
-      const updated = await prisma.job.updateMany({
-        where: {
-          id: job.id,
-          status: "QUEUED",
-        },
-        data: {
-          status: "PROCESSING",
-          startedAt: new Date(),
-          workerId, // dynamic worker identity
-          errorMessage: null,
-        },
-      });
+      try {
+        updated = await prisma.job.updateMany({
+          where: {
+            id: job.id,
+            status: "QUEUED",
+          },
+          data: {
+            status: "PROCESSING",
+            startedAt: new Date(),
+            workerId,
+            errorMessage: null,
+          },
+        });
+      } finally {
+        endDbProcessing();
+      }
 
-      endDbProcessing();
       console.log(
         "DB -> PROCESSING:",
         (performance.now() - dbProcessingStart).toFixed(2),
@@ -408,11 +416,13 @@ async function startWorker() {
        * - Because duplicates can still happen
        */
       const processStart = performance.now();
+
       const endBusinessTimer = businessLogicDuration.startTimer();
-
-      await processJob(job);
-
-      endBusinessTimer();
+      try {
+        await processJob(job);
+      } finally {
+        endBusinessTimer();
+      }
 
       const duration = performance.now() - processStart;
 
@@ -429,15 +439,18 @@ async function startWorker() {
       const endDbCompleted = dbDuration.startTimer({
         operation: "update_completed",
       });
-      await prisma.job.update({
-        where: { id: job.id },
-        data: {
-          status: "COMPLETED",
-          completedAt: new Date(),
-          errorMessage: null,
-        },
-      });
-      endDbCompleted();
+      try {
+        await prisma.job.update({
+          where: { id: job.id },
+          data: {
+            status: "COMPLETED",
+            completedAt: new Date(),
+            errorMessage: null,
+          },
+        });
+      } finally {
+        endDbCompleted();
+      }
       console.log(
         "DB -> COMPLETED:",
         (performance.now() - dbCompleteStart).toFixed(2),
@@ -585,5 +598,5 @@ async function startWorker() {
     }
   }
 }
-
+startMetricsServer(Number(process.env.WORKER_METRICS_PORT) || 3001);
 startWorker();

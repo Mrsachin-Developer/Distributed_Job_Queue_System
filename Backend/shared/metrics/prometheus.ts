@@ -1,12 +1,32 @@
 import { Registry, collectDefaultMetrics, Gauge, Histogram } from "prom-client";
 import { metrics } from "./metrics";
-
+import { redisClient } from "../redis/redisClient";
+import { getActiveWorkers } from "../cluster/workerRegistry";
 export const register = new Registry();
 
 collectDefaultMetrics({
   register,
 });
 
+const QUEUES = [
+  // High
+  "high_priority_queue:0",
+  "high_priority_queue:1",
+  "high_priority_queue:2",
+  "high_priority_queue:3",
+
+  // Medium
+  "medium_priority_queue:0",
+  "medium_priority_queue:1",
+  "medium_priority_queue:2",
+  "medium_priority_queue:3",
+
+  // Low
+  "low_priority_queue:0",
+  "low_priority_queue:1",
+  "low_priority_queue:2",
+  "low_priority_queue:3",
+];
 /*
 |--------------------------------------------------------------------------
 | Queue State Metrics
@@ -40,6 +60,17 @@ export const dlqTotal = new Gauge({
 export const processingJobs = new Gauge({
   name: "queue_processing_jobs",
   help: "Current number of jobs being processed",
+  registers: [register],
+});
+export const activeWorkers = new Gauge({
+  name: "queue_active_workers",
+  help: "Current number of active workers",
+  registers: [register],
+});
+export const queueDepth = new Gauge({
+  name: "queue_depth",
+  help: "Current number of jobs waiting in each queue",
+  labelNames: ["queue"] as const,
   registers: [register],
 });
 
@@ -100,4 +131,16 @@ export async function updateMetricsFromRedis() {
   );
 
   processingJobs.set(activeProcessing);
+
+  const workers = await getActiveWorkers();
+  activeWorkers.set(workers.length);
+
+  // Update queue depth for every partition
+  await Promise.all(
+    QUEUES.map(async (queue) => {
+      const depth = await redisClient.lLen(queue);
+
+      queueDepth.labels({ queue }).set(depth);
+    }),
+  );
 }
