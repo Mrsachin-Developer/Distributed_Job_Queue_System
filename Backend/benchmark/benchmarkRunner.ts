@@ -14,56 +14,66 @@ export async function runBenchMark() {
 
     console.log("3. Before generateLoad()");
 
-    const loadStart = performance.now();
     const loadResult = await generateLoad();
     const benchmarkUserId = loadResult.benchmarkUserId;
 
     console.log(
-      `generateLoad took ${(performance.now() - loadStart).toFixed(2)} ms`,
+      `generateLoad took ${(loadResult.loadEndTime - loadResult.loadStartTime).toFixed(2)} ms`,
     );
-    console.log("\nWaiting for all benchmark jobs to finish...\n");
-    const MAX_WAIT_MS = 5 * 60 * 1000; // 5 minutes
-    const waitStart = Date.now();
-    const waitStartPerf = performance.now();
-    while (true) {
-      const stats = await prisma.job.groupBy({
-        by: ["status"],
-        where: {
-          userId: benchmarkUserId,
-        },
-        _count: true,
-      });
 
-      console.log(stats);
+    console.log(`\nTotal jobs configured: ${loadResult.totalJobs}`);
+    console.log(`Successfully submitted: ${loadResult.submittedJobs}`);
+    console.log(`Submission failed: ${loadResult.submissionFailedJobs}`);
 
-      const processedJobs = await prisma.job.count({
-        where: {
-          userId: benchmarkUserId,
-          status: {
-            in: ["COMPLETED", "DLQ"],
+    let processingEndTime = 0;
+
+    if (loadResult.submittedJobs > 0) {
+      console.log("\nWaiting for all benchmark jobs to finish...\n");
+
+      const MAX_WAIT_MS = benchmarkConfig.BENCHMARK_TIMEOUT_MS; // Benchmark timeout
+      const waitStart = Date.now();
+      const waitStartPerf = performance.now();
+
+      while (true) {
+        const processedJobs = await prisma.job.count({
+          where: {
+            userId: benchmarkUserId,
+            status: {
+              in: ["COMPLETED", "DLQ"],
+            },
           },
-        },
-      });
-      console.log(`User=${benchmarkUserId}, Processed=${processedJobs}`);
-      process.stdout.write(
-        `\rProcessed: ${processedJobs}/${benchmarkConfig.TOTAL_JOBS}`,
-      );
+        });
 
-      if (processedJobs >= benchmarkConfig.TOTAL_JOBS) {
-        break;
-      }
+        console.log(`User=${benchmarkUserId}, Processed=${processedJobs}`);
 
-      if (Date.now() - waitStart > MAX_WAIT_MS) {
-        throw new Error(
-          "Benchmark timed out while waiting for all jobs to finish.",
+        process.stdout.write(
+          `\rProcessed: ${processedJobs}/${loadResult.submittedJobs}`,
         );
+
+        if (processedJobs >= loadResult.submittedJobs) {
+          break;
+        }
+
+        if (Date.now() - waitStart > MAX_WAIT_MS) {
+          throw new Error(
+            "Benchmark timed out while waiting for all submitted jobs to finish.",
+          );
+        }
+
+        await sleep(benchmarkConfig.POLL_INTERVAL_MS);
       }
 
-      await sleep(500);
+      processingEndTime = performance.now();
+
+      console.log(
+        `\nWaiting loop took ${(performance.now() - waitStartPerf).toFixed(2)} ms`,
+      );
+    } else {
+      console.log(
+        "\nNo jobs were successfully submitted. Skipping processing wait.",
+      );
     }
-    console.log(
-      `\nWaiting loop took ${(performance.now() - waitStartPerf).toFixed(2)} ms`,
-    );
+
     const completedJobs = await prisma.job.count({
       where: {
         userId: benchmarkUserId,
@@ -77,21 +87,38 @@ export async function runBenchMark() {
         status: "DLQ",
       },
     });
-    console.log("\nAll benchmark jobs have reached a terminal state.");
+
+    const terminalJobs = completedJobs + failedJobs;
+
+    if (terminalJobs !== loadResult.submittedJobs) {
+      throw new Error(
+        `Job count mismatch. Submitted: ${loadResult.submittedJobs}, Terminal: ${terminalJobs}`,
+      );
+    }
+
+    console.log(
+      "\nAll submitted benchmark jobs have reached a terminal state.",
+    );
 
     const endTime = performance.now();
+
     const benchmarkResult: BenchmarkResult = {
       startTime,
       endTime,
 
       ...loadResult,
 
+      processingEndTime,
+
       completedJobs,
       failedJobs,
     };
+
     console.log(`TOTAL benchmark time: ${(endTime - startTime).toFixed(2)} ms`);
+
     generateBenchmarkReport(benchmarkResult);
   } catch (error) {
     console.error("Failed to run benchmark:", error);
+    throw error;
   }
 }

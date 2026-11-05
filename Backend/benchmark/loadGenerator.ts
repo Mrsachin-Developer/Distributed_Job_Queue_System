@@ -16,6 +16,13 @@ interface LoadGeneratorResult {
   totalBatches: number;
   successfulBatches: number;
   failedBatches: number;
+
+  loadStartTime: number;
+  loadEndTime: number;
+  processingStartTime: number;
+
+  submittedJobs: number;
+  submissionFailedJobs: number;
 }
 
 function generateProcessingTime(): number {
@@ -61,11 +68,13 @@ function generatePriorityDistribution(): Priority[] {
       remainder: idealLow - Math.floor(idealLow),
     },
   ];
+
   let allocatedJobs = 0;
 
   for (const allocation of allocations) {
     allocatedJobs += allocation.count;
   }
+
   const remainingJobs = TOTAL_JOBS - allocatedJobs;
 
   // Sort by largest remainder.
@@ -106,15 +115,25 @@ interface BenchmarkJob {
   priority: Priority;
   payload: BenchmarkPayload;
 }
+
 interface BenchmarkPayload {
   source: "benchmark";
   processingTime: number;
 }
+
 export async function generateLoad(): Promise<LoadGeneratorResult> {
+  const loadStartTime = performance.now();
+
   const benchmarkUserId = `benchmark-${Date.now()}`;
+
   let totalBatches = 0;
   let successfulBatches = 0;
   let failedBatches = 0;
+
+  let submittedJobs = 0;
+  let submissionFailedJobs = 0;
+  let processingStartTime = 0;
+
   const { TOTAL_JOBS, BATCH_SIZE, BATCH_DELAY_MS, API_URL } = benchmarkConfig;
 
   const priorities = generatePriorityDistribution();
@@ -136,33 +155,57 @@ export async function generateLoad(): Promise<LoadGeneratorResult> {
     if (batch.length === BATCH_SIZE) {
       totalBatches++;
 
+      const currentBatchSize = batch.length;
+
       try {
         await axios.post(API_URL, {
           userId: benchmarkUserId,
           jobs: batch,
         });
+
         successfulBatches++;
+        submittedJobs += currentBatchSize;
+
+        if (processingStartTime === 0) {
+          processingStartTime = performance.now();
+        }
       } catch (error) {
         console.error("Failed to submit batch:", error);
         failedBatches++;
+        submissionFailedJobs += currentBatchSize;
       }
+
       batch.length = 0;
+
       await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
     }
   }
+
   if (batch.length > 0) {
     totalBatches++;
+
+    const currentBatchSize = batch.length;
+
     try {
       await axios.post(API_URL, {
         userId: benchmarkUserId,
         jobs: batch,
       });
+
       successfulBatches++;
+      submittedJobs += currentBatchSize;
+
+      if (processingStartTime === 0) {
+        processingStartTime = performance.now();
+      }
     } catch (error) {
       failedBatches++;
+      submissionFailedJobs += currentBatchSize;
       console.error("Failed to submit final batch:", error);
     }
   }
+
+  const loadEndTime = performance.now();
 
   return {
     benchmarkUserId,
@@ -170,5 +213,12 @@ export async function generateLoad(): Promise<LoadGeneratorResult> {
     totalBatches,
     successfulBatches,
     failedBatches,
+
+    loadStartTime,
+    loadEndTime,
+    processingStartTime,
+
+    submittedJobs,
+    submissionFailedJobs,
   };
 }

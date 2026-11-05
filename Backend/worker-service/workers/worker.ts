@@ -228,8 +228,7 @@ async function startWorker() {
   while (!isShuttingDown) {
     const delay = 2000 + Math.floor(Math.random() * 1000);
     let job: any = null;
-
-    const endJobTimer = jobDuration.startTimer();
+    let endJobTimer: (() => void) | undefined;
 
     try {
       const queue = scheduler.nextQueue();
@@ -403,6 +402,8 @@ async function startWorker() {
         );
         continue;
       }
+      // Start timer only when actual job processing begins
+      endJobTimer = jobDuration.startTimer();
 
       /**
        * ============================================================
@@ -594,7 +595,7 @@ async function startWorker() {
         }
       }
     } finally {
-      endJobTimer();
+     endJobTimer?.();
     }
   }
 }

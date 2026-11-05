@@ -1,0 +1,11 @@
+{
+  "watch": ["worker-service"],
+  "ext": "ts",
+  "ignore": [
+    "node_modules",
+    "generated/**",
+    "dist/**",
+    "coverage/**"
+  ],
+  "exec": "npx ts-node worker-service/workers/worker.ts"
+}
