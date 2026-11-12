@@ -10,9 +10,9 @@
 
 # ⚡ Distributed Job Queue System
 
-A **production-grade, horizontally scalable** distributed job queue built from scratch — no BullMQ, no Celery, no SQS. Every component — the scheduler, the distributed lock manager, the partition rebalancer, the rate limiter, the recovery scanner — is **hand-engineered** to demonstrate deep systems-design understanding.
+A **production-oriented distributed job queue** built from scratch, designed to explore reliable asynchronous processing, worker coordination, recovery, and observability — no BullMQ, no Celery, no SQS. Every component — the scheduler, the distributed lock manager, the partition rebalancer, the rate limiter, the recovery scanner — is **hand-engineered** to demonstrate deep systems-design understanding.
 
-> **Why this project?** Most job queues are a `npm install bullmq` away. This one exists to prove I can *design* one: handle race conditions, prevent data loss, guarantee exactly-once semantics, and scale workers horizontally — all with clear, documented reasoning in every code comment.
+> **Why this project?** Most job queues are a `npm install bullmq` away. This one exists to prove I can *design* one: handle concurrency, recover from partial failures, reduce duplicate side effects through idempotency, and coordinate workers horizontally — with the trade-offs and failure modes documented.
 
 ---
 
@@ -108,7 +108,7 @@ A **production-grade, horizontally scalable** distributed job queue built from s
 
 ### Dual-Write Architecture (PostgreSQL + Redis)
 
-The system uses a **dual-write pattern** where the database is the **source of truth** and Redis is the **execution layer**:
+Job creation currently follows a database-plus-Redis enqueue flow: PostgreSQL is the **durable source of truth**, while Redis is the **execution/coordination layer**. This is a dual-system workflow, so partial failures must be handled explicitly:
 
 ```
 Client Request
@@ -121,20 +121,20 @@ Client Request
 └─────────────────┘    └─────────────────┘
 ```
 
-> **Why not just Redis?** Redis is volatile — a crash loses jobs. PostgreSQL guarantees durability.  
-> **Why not just PostgreSQL?** Polling a DB for work is slow. Redis `BLPOP` gives instant, blocking dequeue.  
+> **Why not just Redis?** Redis is used for fast queue operations, while PostgreSQL retains durable job records. Redis persistence and deployment configuration still affect its recovery characteristics.  
+> **Why not just PostgreSQL?** Polling a DB for work is slow. Redis blocking list operations (such as `BLPOP`) let workers wait for available work instead of continuously polling.  
 > **What if Redis push fails after DB write?** The Recovery Scanner catches exactly this — it scans for `QUEUED` jobs that never reached Redis and re-enqueues them.
 
-### Consistent Hashing for Queue Partitioning
+### Hash-Based Queue Partitioning
 
-Jobs are distributed across **4 partitions per priority level** (12 total queues) using a consistent hash of the `userId`:
+Jobs are distributed across **4 partitions per priority level** (12 total queues) using a deterministic hash of the `userId` (the exact partitioning algorithm should be kept consistent with the implementation):
 
 ```
 hash("user-abc") % 4 = 2  →  high_priority_queue:2
 ```
 
-This ensures:
-- **Same user's jobs land in the same partition** → preserves ordering per user
+This routing approach aims to provide:
+- **Same user's jobs are routed to the same partition** → co-locates that user's jobs; partition placement alone does not guarantee execution order
 - **Load is evenly distributed** across partitions
 - **Workers can own specific partitions** → reduces contention
 
@@ -146,9 +146,9 @@ This ensures:
 | Feature | Implementation |
 |---|---|
 | **Priority Queues** | 3-tier (HIGH / MEDIUM / LOW) with weighted scheduling (5:2:1) |
-| **Partitioned Queues** | 4 partitions per priority = 12 total Redis lists, hash-routed by userId |
+| **Partitioned Queues** | 4 partitions per priority = 12 Redis lists, routed by a hash of `userId` |
 | **Batch Ingestion** | Bulk `createMany` in PostgreSQL + parallel Redis pushes |
-| **Exactly-Once Processing** | Atomic DB claim → Redis lock → Idempotency key (3-layer guarantee) |
+| **Duplicate-Execution Protection** | Atomic database state transitions, Redis locking, and idempotency checks; this does **not** provide end-to-end exactly-once guarantees |
 
 ### 🔄 Distributed Worker Coordination
 | Feature | Implementation |
@@ -267,7 +267,7 @@ Backend/
 │   └── prometheus.yml             # Scrape config (API + Worker targets)
 │
 └── prisma/
-    └── schema.prisma              # Database schema with 7 composite indexes
+    └── schema.prisma              # Database schema with 7 indexes
 ```
 
 ---
@@ -302,7 +302,7 @@ model Job {
 }
 ```
 
-> **7 composite indexes** are specifically designed for the query patterns used by the worker, recovery scanner, and metrics system — no full table scans.
+> **7 indexes** are chosen to support query patterns used by the worker and recovery scanner. Indexes improve targeted lookups, but do not guarantee that every query avoids a sequential scan.
 
 ---
 
@@ -470,7 +470,7 @@ Runs every **5 seconds**, handling two failure modes:
 | **Missed Enqueue** | `QUEUED` jobs >10s old | Re-push to correct Redis partition |
 | **Stuck Processing** | `PROCESSING` jobs >10s with dead worker | Reset to `QUEUED` + re-enqueue |
 
-The scanner checks worker liveness before declaring a job stuck — if the worker's heartbeat is still alive, the job is left alone.
+The scanner should consider worker liveness before reclaiming a job. A heartbeat is evidence of process liveness, not proof that a particular job is making progress; recovery thresholds and ownership checks must therefore be conservative.
 
 ### Alert Service
 
@@ -495,12 +495,14 @@ Every 30 seconds:
 
 ### Prometheus Metrics
 
+> *The `_total` metrics are listed as counters following Prometheus conventions. Confirm that the exporter registers them as `Counter` metrics before relying on these types in dashboards. Live values such as queue depth, active workers, and currently processing jobs are gauges.
+
 | Metric | Type | Description |
 |---|---|---|
-| `queue_processed_total` | Gauge | Total successfully processed jobs |
-| `queue_failed_total` | Gauge | Total failed jobs |
-| `queue_retry_total` | Gauge | Total retried jobs |
-| `queue_dlq_total` | Gauge | Total jobs in Dead Letter Queue |
+| `queue_processed_total` | Counter* | Total successfully processed jobs |
+| `queue_failed_total` | Counter* | Total failed jobs |
+| `queue_retry_total` | Counter* | Total retried jobs |
+| `queue_dlq_total` | Counter* | Total jobs in Dead Letter Queue |
 | `queue_processing_jobs` | Gauge | Currently processing job count |
 | `queue_active_workers` | Gauge | Live worker count |
 | `queue_depth` | Gauge (labeled) | Per-queue depth for all 12 partitions |
@@ -540,7 +542,9 @@ npm run benchmark
 }
 ```
 
-### Sample Report Output
+### Recorded Benchmark Result
+
+The following is the latest recorded 100-job run shared during development. It is an environment-specific observation, not a general performance guarantee. Results depend on the machine, database, Redis deployment, worker count, and configuration.
 
 ```
 ======================================
@@ -548,18 +552,20 @@ npm run benchmark
 ======================================
 
 --- Timing ---
-Overall Duration          : 12.34 sec
-Submission Duration       : 1.52 sec
-Queue Drain Duration      : 10.82 sec
+Overall Duration          : 543.80 sec
+Submission Duration       : not separately recorded in the available benchmark summary
+Queue Drain Duration      : 543.72 sec
 
 --- Throughput ---
-End-to-End Throughput     : 8.10 jobs/sec
-Queue-Drain Throughput    : 9.24 jobs/sec
+End-to-End Throughput     : approximately 0.18 jobs/sec
+Queue-Drain Throughput    : approximately 0.18 jobs/sec
 
 --- Job Statistics ---
 Configured Jobs           : 100
 Submitted Jobs            : 100
 Completed Jobs            : 100
+Submission Failures        : 0
+Failed Batches             : 0
 Jobs in DLQ               : 0
 
 --- Rates ---
@@ -582,7 +588,7 @@ Submission Success Rate   : 100.00%
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/Distributed_Job_Queue_System.git
+git clone https://github.com/Mrsachin-Developer/Distributed_Job_Queue_System.git
 cd Distributed_Job_Queue_System/Backend
 
 # Install dependencies
@@ -590,12 +596,13 @@ npm install
 
 # Set up environment
 cp .env.example .env
-# Edit .env with your PostgreSQL connection string
+# Edit .env with your PostgreSQL and Redis connection settings.
+# Never commit .env or paste credentials into logs/reports.
 
 # Run database migrations
 npx prisma migrate dev
 
-# Generate Prisma client
+# Generate Prisma client (use the generator/configuration required by this repo)
 npx prisma generate
 ```
 
@@ -653,6 +660,14 @@ cd prometheus
 
 ---
 
+## ⚠️ Reliability Semantics and Known Limitations
+
+- The system should be described as **at-least-once oriented** unless the complete processing path and every external side effect are made idempotent. A worker can perform a side effect and crash before persisting completion, so a retry may execute the handler again.
+- Redis locks and database state transitions are coordination and duplicate-reduction mechanisms; they do not create a distributed transaction across PostgreSQL, Redis, and external services.
+- A partition lease expiring does not physically stop a paused former owner. Operations that require strict stale-owner rejection need fencing/ownership validation at the protected write boundary.
+- A successful benchmark on a local development setup does not establish production capacity. Publish hardware, worker count, dependency versions, and test configuration alongside performance claims.
+- Verify every endpoint, metric name, metric type, threshold, and feature claim against the current source before treating this README as an implementation contract.
+
 ## 🧠 Design Decisions & Trade-offs
 
 | Decision | Reasoning |
@@ -660,9 +675,9 @@ cd prometheus
 | **PostgreSQL as source of truth** | Durability guarantee — Redis is volatile |
 | **Redis for queue operations** | `BLPOP` gives O(1) blocking dequeue; DB polling doesn't scale |
 | **Lua-based rate limiter** | Atomic token bucket — no race conditions even under concurrent load |
-| **Partition-based queues** | Reduces lock contention vs. single queue; enables per-user ordering |
+| **Partition-based queues** | Spreads work across multiple queues and can co-locate jobs by user; strict per-user execution ordering requires additional coordination |
 | **Lease-based ownership** | No centralized coordinator needed; crash recovery via TTL expiry |
-| **3-layer exactly-once** | DB claim → Redis lock → idempotency key — defense in depth |
+| **Layered duplicate protection** | DB state claim, Redis lock, and idempotency check reduce duplicate execution risk but do not guarantee exactly-once external side effects |
 | **Jittered retry delays** | `2000 + random(1000)ms` prevents thundering herd on retries |
 | **Fail-open middleware** | Rate limiter and backpressure fail open — availability over strictness |
 | **Recovery scanner batching** | `take: 50` limits per-scan to prevent DB overload |
